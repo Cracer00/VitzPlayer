@@ -93,6 +93,18 @@ class ApiClient(private val store: TokenStore) {
         return response.body()
     }
 
+    suspend inline fun <reified T> post(path: String, body: Any? = null): T {
+        val response = authorized(HttpMethod.Post, path, body)
+        if (!response.status.isSuccess()) throw response.toApiException()
+        return response.body()
+    }
+
+    /** Для точек, которые отвечают 204 и телом не отчитываются. */
+    suspend fun send(method: HttpMethod, path: String, body: Any? = null) {
+        val response = authorized(method, path, body)
+        if (!response.status.isSuccess()) throw response.toApiException()
+    }
+
     suspend fun authorized(
         method: HttpMethod,
         path: String,

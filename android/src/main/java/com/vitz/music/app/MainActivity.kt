@@ -15,8 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vitz.music.app.ui.AppState
 import com.vitz.music.app.ui.AppViewModel
-import com.vitz.music.app.ui.HomeScreen
 import com.vitz.music.app.ui.LoginScreen
+import com.vitz.music.app.ui.MainScreen
 import com.vitz.music.app.ui.theme.VitzMusicTheme
 
 class MainActivity : ComponentActivity() {
@@ -48,9 +48,9 @@ private fun AppRoot(model: AppViewModel, app: VitzMusicApp, modifier: Modifier =
             modifier = modifier,
         )
 
-        is AppState.LoggedIn -> HomeScreen(
+        is AppState.LoggedIn -> MainScreen(
             me = state.me,
-            api = app.api,
+            app = app,
             onLogout = model::logout,
             modifier = modifier,
         )
