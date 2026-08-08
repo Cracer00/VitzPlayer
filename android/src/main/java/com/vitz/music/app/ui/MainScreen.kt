@@ -1,5 +1,6 @@
 package com.vitz.music.app.ui
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LibraryMusic
@@ -12,10 +13,15 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.media3.common.util.UnstableApi
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -29,6 +35,9 @@ import com.vitz.music.app.ui.library.LibraryViewModel
 import com.vitz.music.app.ui.library.PlaylistDetailScreen
 import com.vitz.music.app.ui.library.PlaylistsScreen
 import com.vitz.music.app.ui.library.SearchScreen
+import com.vitz.music.app.player.PlayerController
+import com.vitz.music.app.ui.player.NowPlayingBar
+import com.vitz.music.app.ui.player.PlayerScreen
 
 private data class Destination(val route: String, val label: String, val icon: ImageVector)
 
@@ -39,6 +48,7 @@ private val destinations = listOf(
     Destination("profile", "Профиль", Icons.Filled.Person),
 )
 
+@UnstableApi
 @Composable
 fun MainScreen(
     me: MeResponse,
@@ -51,13 +61,22 @@ fun MainScreen(
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
 
-    // Место, куда на четвёртом срезе встанет запуск воспроизведения.
-    val onPlay: (TrackDto, List<TrackDto>) -> Unit = { _, _ -> }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val player = remember { PlayerController(context.applicationContext, scope) }
+    DisposableEffect(Unit) {
+        player.connect()
+        onDispose { player.release() }
+    }
+
+    val onPlay: (TrackDto, List<TrackDto>) -> Unit = { track, queue -> player.play(track, queue) }
 
     Scaffold(
         modifier = modifier,
         bottomBar = {
-            NavigationBar {
+            Column {
+                NowPlayingBar(player = player, onOpen = { nav.navigate("player") })
+                NavigationBar {
                 destinations.forEach { destination ->
                     NavigationBarItem(
                         selected = currentRoute == destination.route,
@@ -69,9 +88,10 @@ fun MainScreen(
                                 restoreState = true
                             }
                         },
-                        icon = { Icon(destination.icon, contentDescription = destination.label) },
-                        label = { Text(destination.label) },
-                    )
+                            icon = { Icon(destination.icon, contentDescription = destination.label) },
+                            label = { Text(destination.label) },
+                        )
+                    }
                 }
             }
         },
@@ -97,6 +117,9 @@ fun MainScreen(
             }
             composable("search") {
                 SearchScreen(model = model, onPlay = onPlay)
+            }
+            composable("player") {
+                PlayerScreen(player = player)
             }
             composable("profile") {
                 HomeScreen(me = me, api = app.api, onLogout = onLogout)
