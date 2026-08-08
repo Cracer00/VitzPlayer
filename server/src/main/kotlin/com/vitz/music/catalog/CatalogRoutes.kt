@@ -53,11 +53,14 @@ fun Route.catalogRoutes(services: AppServices) = route("/api/v1") {
             val albumId = call.uuidQuery("albumId")
             val limit = call.limit()
             val offset = call.offset()
+            // Поиск внутри вкладки: фильтровать уже загруженную страницу нельзя —
+            // нужное может лежать на сотой, а вытаскивать каталог целиком незачем.
+            val query = call.request.queryParameters["q"]
 
             val page = dbRead { c ->
-                val rows = Catalog.listTracks(c, artistId, albumId, limit, offset)
+                val rows = Catalog.listTracks(c, artistId, albumId, limit, offset, query)
                 val liked = Catalog.likedIds(c, user.userId, rows)
-                val total = Catalog.countTracks(c, artistId, albumId)
+                val total = Catalog.countTracks(c, artistId, albumId, query)
                 Page(
                     items = rows.map { it.toDto(cfg.publicUrl, signer, user.userId, it.id in liked) },
                     total = total,
@@ -126,28 +129,42 @@ fun Route.catalogRoutes(services: AppServices) = route("/api/v1") {
             val user = call.user()
             val limit = call.limit()
             val offset = call.offset()
+            val pattern = Catalog.likePattern(call.request.queryParameters["q"])
+            val filter = if (pattern != null) "and (t.title_norm like ? or a.name_norm like ?)" else ""
+
             val page = dbRead { c ->
+                val listArgs = buildList<Any?> {
+                    add(user.userId)
+                    if (pattern != null) { add(pattern); add(pattern) }
+                    add(limit); add(offset)
+                }
                 val rows = Catalog.withRenditions(
                     c,
                     c.select(
                         """
                         ${Catalog.TRACK_SELECT}
                         join track_likes l on l.track_id = t.id and l.user_id = ?
-                        where t.deleted_at is null
+                        where t.deleted_at is null $filter
                         order by l.liked_at desc
                         limit ? offset ?
                         """.trimIndent(),
-                        user.userId, limit, offset,
+                        *listArgs.toTypedArray(),
                     ) { Catalog.mapTrack(it) },
                 )
+                val countArgs = buildList<Any?> {
+                    add(user.userId)
+                    if (pattern != null) { add(pattern); add(pattern) }
+                }
                 Page(
                     items = rows.map { it.toDto(cfg.publicUrl, signer, user.userId, true) },
                     total = c.count(
                         """
-                        select count(*) from track_likes l join tracks t on t.id = l.track_id
-                        where l.user_id = ? and t.deleted_at is null
+                        select count(*) from track_likes l
+                        join tracks t on t.id = l.track_id
+                        join artists a on a.id = t.artist_id
+                        where l.user_id = ? and t.deleted_at is null $filter
                         """.trimIndent(),
-                        user.userId,
+                        *countArgs.toTypedArray(),
                     ),
                     offset = offset,
                     limit = limit,

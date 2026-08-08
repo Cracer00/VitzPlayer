@@ -52,12 +52,23 @@ class PlayerController(private val context: Context, private val scope: Coroutin
 
     val isConnected: Boolean get() = controller != null
 
+    /** Запрос, пришедший до того, как подключение к сессии состоялось. */
+    private var pending: Pair<TrackDto, List<TrackDto>>? = null
+
     fun connect() {
         if (controller != null) return
         val token = SessionToken(context, ComponentName(context, PlaybackService::class.java))
         val future = MediaController.Builder(context, token).buildAsync()
         future.addListener({
-            controller = runCatching { future.get() }.getOrNull()?.also { attach(it) }
+            controller = runCatching { future.get() }.getOrNull()?.also { ready ->
+                attach(ready)
+                // Подключение асинхронное, а по треку могли тапнуть сразу после запуска
+                // приложения. Без этого первое нажатие молча пропадало бы.
+                pending?.let { (track, queue) ->
+                    pending = null
+                    play(track, queue)
+                }
+            }
         }, MoreExecutors.directExecutor())
 
         scope.launch {
@@ -96,13 +107,25 @@ class PlayerController(private val context: Context, private val scope: Coroutin
     // --- команды ---
 
     fun play(track: TrackDto, queue: List<TrackDto>) {
-        val controller = controller ?: return
-        val items = queue.mapNotNull { it.toMediaItem() }
-        val startIndex = queue.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+        val controller = controller
+        if (controller == null) {
+            pending = track to queue
+            connect()
+            return
+        }
+
+        // Индекс считаем по тому же списку, из которого собраны элементы: если у части треков
+        // не оказалось ссылок, индексы исходной очереди уже не совпадают с итоговыми.
+        val playable = queue.filter { it.media.isNotEmpty() }
+        val items = playable.mapNotNull { it.toMediaItem() }
         if (items.isEmpty()) return
+        val startIndex = playable.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
+
         controller.setMediaItems(items, startIndex, 0L)
+        // playWhenReady до prepare(): вызванный сразу после подготовки play() успевает
+        // отработать раньше, чем сессия готова его принять, и воспроизведение не стартует.
+        controller.playWhenReady = true
         controller.prepare()
-        controller.play()
     }
 
     fun togglePlayPause() {

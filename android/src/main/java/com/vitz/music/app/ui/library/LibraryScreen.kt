@@ -8,8 +8,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -57,6 +62,21 @@ fun LibraryScreen(
             )
         }
 
+        OutlinedTextField(
+            value = model.libraryQuery,
+            onValueChange = model::onLibraryQueryChange,
+            label = { Text(if (model.tab == LibraryTab.LIKED) "Поиск в понравившихся" else "Поиск в каталоге") },
+            singleLine = true,
+            trailingIcon = {
+                if (model.libraryQuery.isNotEmpty()) {
+                    IconButton(onClick = { model.onLibraryQueryChange("") }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Очистить")
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        )
+
         model.error?.let { error ->
             Text(
                 error,
@@ -69,7 +89,11 @@ fun LibraryScreen(
         if (model.tracks.isEmpty() && !model.loading) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    if (model.tab == LibraryTab.LIKED) "Пока ничего не отмечено" else "Каталог пуст",
+                    when {
+                        model.libraryQuery.isNotBlank() -> "По запросу ничего не нашлось"
+                        model.tab == LibraryTab.LIKED -> "Пока ничего не отмечено"
+                        else -> "Каталог пуст"
+                    },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

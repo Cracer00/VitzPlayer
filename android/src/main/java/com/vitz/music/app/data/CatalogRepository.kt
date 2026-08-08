@@ -17,11 +17,14 @@ import io.ktor.http.encodeURLParameter
  */
 class CatalogRepository(private val api: ApiClient) {
 
-    suspend fun tracks(offset: Int, limit: Int = PAGE_SIZE): Page<TrackDto> =
-        api.get("/api/v1/tracks?limit=$limit&offset=$offset")
+    suspend fun tracks(offset: Int, limit: Int = PAGE_SIZE, query: String? = null): Page<TrackDto> =
+        api.get("/api/v1/tracks?limit=$limit&offset=$offset${query.asQueryParam()}")
 
-    suspend fun likedTracks(offset: Int, limit: Int = PAGE_SIZE): Page<TrackDto> =
-        api.get("/api/v1/likes?limit=$limit&offset=$offset")
+    suspend fun likedTracks(offset: Int, limit: Int = PAGE_SIZE, query: String? = null): Page<TrackDto> =
+        api.get("/api/v1/likes?limit=$limit&offset=$offset${query.asQueryParam()}")
+
+    private fun String?.asQueryParam(): String =
+        this?.trim()?.takeIf { it.isNotEmpty() }?.let { "&q=${it.encodeURLParameter()}" }.orEmpty()
 
     suspend fun recent(limit: Int = 30): Page<TrackDto> = api.get("/api/v1/recent?limit=$limit")
 

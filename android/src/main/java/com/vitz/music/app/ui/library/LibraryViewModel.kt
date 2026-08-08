@@ -37,7 +37,12 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
     var searchResult by mutableStateOf<SearchResponse?>(null)
         private set
 
+    /** Фильтр внутри вкладки — отдельный от полноценного поиска на своей вкладке. */
+    var libraryQuery by mutableStateOf("")
+        private set
+
     private var searchJob: Job? = null
+    private var filterJob: Job? = null
     private var endReached = false
 
     init {
@@ -64,9 +69,10 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
         loading = true
         viewModelScope.launch {
             runCatching {
+                val filter = libraryQuery.trim().takeIf { it.isNotEmpty() }
                 when (tab) {
-                    LibraryTab.ALL -> catalog.tracks(offset = tracks.size)
-                    LibraryTab.LIKED -> catalog.likedTracks(offset = tracks.size)
+                    LibraryTab.ALL -> catalog.tracks(offset = tracks.size, query = filter)
+                    LibraryTab.LIKED -> catalog.likedTracks(offset = tracks.size, query = filter)
                 }
             }.onSuccess { page ->
                 tracks.addAll(page.items)
@@ -109,6 +115,19 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
                     if (index >= 0 && index < tracks.size) tracks[index] = tracks[index].copy(liked = !desired)
                     error = "Не удалось сохранить отметку"
                 }
+        }
+    }
+
+    /**
+     * Фильтр вкладки уходит на сервер, а не режет уже загруженную страницу: нужное может
+     * лежать на сотой странице, и фильтр по видимому куску врал бы «ничего не найдено».
+     */
+    fun onLibraryQueryChange(next: String) {
+        libraryQuery = next
+        filterJob?.cancel()
+        filterJob = viewModelScope.launch {
+            delay(300)
+            reload()
         }
     }
 

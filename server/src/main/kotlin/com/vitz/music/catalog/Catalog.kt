@@ -315,15 +315,29 @@ object Catalog {
         c.selectOne("$TRACK_SELECT where t.id = ? and t.deleted_at is null", id) { mapTrack(it) }
             ?.let { withRenditions(c, listOf(it)).first() }
 
-    fun listTracks(c: Connection, artistId: UUID?, albumId: UUID?, limit: Int, offset: Int): List<TrackRow> {
+    /** Подстрока для поиска по нормализованным полям; null — фильтра нет. */
+    fun likePattern(query: String?): String? =
+        query?.trim()?.takeIf { it.isNotEmpty() }?.let { "%${normalizeName(it)}%" }
+
+    fun listTracks(
+        c: Connection,
+        artistId: UUID?,
+        albumId: UUID?,
+        limit: Int,
+        offset: Int,
+        query: String? = null,
+    ): List<TrackRow> {
+        val pattern = likePattern(query)
         val conditions = buildList {
             add("t.deleted_at is null")
             if (artistId != null) add("t.artist_id = ?")
             if (albumId != null) add("t.album_id = ?")
+            if (pattern != null) add("(t.title_norm like ? or a.name_norm like ?)")
         }
         val args = buildList<Any?> {
             if (artistId != null) add(artistId)
             if (albumId != null) add(albumId)
+            if (pattern != null) { add(pattern); add(pattern) }
             add(limit); add(offset)
         }
         val order = if (albumId != null) "order by t.disc_no nulls first, t.track_no nulls last, t.title"
@@ -335,17 +349,26 @@ object Catalog {
         return withRenditions(c, rows)
     }
 
-    fun countTracks(c: Connection, artistId: UUID?, albumId: UUID?): Long {
+    fun countTracks(c: Connection, artistId: UUID?, albumId: UUID?, query: String? = null): Long {
+        val pattern = likePattern(query)
         val conditions = buildList {
-            add("deleted_at is null")
-            if (artistId != null) add("artist_id = ?")
-            if (albumId != null) add("album_id = ?")
+            add("t.deleted_at is null")
+            if (artistId != null) add("t.artist_id = ?")
+            if (albumId != null) add("t.album_id = ?")
+            if (pattern != null) add("(t.title_norm like ? or a.name_norm like ?)")
         }
         val args = buildList<Any?> {
             if (artistId != null) add(artistId)
             if (albumId != null) add(albumId)
+            if (pattern != null) { add(pattern); add(pattern) }
         }
-        return c.count("select count(*) from tracks where ${conditions.joinToString(" and ")}", *args.toTypedArray())
+        return c.count(
+            """
+            select count(*) from tracks t join artists a on a.id = t.artist_id
+            where ${conditions.joinToString(" and ")}
+            """.trimIndent(),
+            *args.toTypedArray(),
+        )
     }
 
     fun searchTracks(c: Connection, query: String, limit: Int): List<TrackRow> {
