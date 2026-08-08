@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Тема нужна только до первого кадра Compose: дальше всё рисует MaterialTheme.
+        Фон тёмный, чтобы при запуске в темноте не бил белый прямоугольник.
+    -->
+    <style name="Theme.VitzMusic" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/night_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

@@ -8,11 +8,11 @@ COPY settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY gradle ./gradle
 COPY shared/build.gradle.kts ./shared/
 COPY server/build.gradle.kts ./server/
-RUN gradle --no-daemon :server:dependencies --configuration runtimeClasspath > /dev/null
+RUN gradle --no-daemon -PskipAndroid :server:dependencies --configuration runtimeClasspath > /dev/null
 
 COPY shared ./shared
 COPY server ./server
-RUN gradle --no-daemon :server:buildFatJar
+RUN gradle --no-daemon -PskipAndroid :server:buildFatJar
 
 # Рантайм: JRE + ffmpeg (ingest: ffprobe, loudnorm, кодирование opus)
 FROM eclipse-temurin:21-jre

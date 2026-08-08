@@ -21,7 +21,7 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew :server:test
+      - run: ./gradlew -PskipAndroid :server:test
 
   deploy:
     name: Образ и деплой

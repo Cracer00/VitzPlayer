@@ -3,6 +3,8 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 .idea/
 *.iml
+# Путь к Android SDK свой на каждой машине.
+local.properties
 .env
 # Только каталог медиа в корне проекта. Без ведущей косой черты git применяет шаблон
 # на любом уровне вложенности и проглатывает пакет com/vitz/music/media.
