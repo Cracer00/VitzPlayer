@@ -4,51 +4,55 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import com.vitz.music.api.API_VERSION
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.vitz.music.app.ui.AppState
+import com.vitz.music.app.ui.AppViewModel
+import com.vitz.music.app.ui.HomeScreen
+import com.vitz.music.app.ui.LoginScreen
 import com.vitz.music.app.ui.theme.VitzMusicTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val app = application as VitzMusicApp
         setContent {
             VitzMusicTheme {
+                val model: AppViewModel = viewModel(factory = AppViewModel.factory(app.api))
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
-                    Placeholder(Modifier.padding(padding))
+                    AppRoot(model, app, Modifier.padding(padding))
                 }
             }
         }
     }
 }
 
-/**
- * Заглушка первого среза. Обращение к [API_VERSION] здесь не украшение: это проверка того,
- * что модуль shared с DTO сервера действительно подключается к Android-сборке —
- * ради этого приложение и живёт в одном репозитории с бэкендом.
- */
 @Composable
-private fun Placeholder(modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text("Vitz Music", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            "Контракт API: $API_VERSION",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+private fun AppRoot(model: AppViewModel, app: VitzMusicApp, modifier: Modifier = Modifier) {
+    when (val state = model.state) {
+        AppState.Loading -> Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+
+        is AppState.LoggedOut -> LoginScreen(
+            state = state,
+            onLogin = model::login,
+            modifier = modifier,
+        )
+
+        is AppState.LoggedIn -> HomeScreen(
+            me = state.me,
+            api = app.api,
+            onLogout = model::logout,
+            modifier = modifier,
         )
     }
 }
