@@ -38,6 +38,9 @@ data class TokenPair(
 )
 
 @Serializable
+data class ChangePasswordRequest(val currentPassword: String, val newPassword: String)
+
+@Serializable
 data class MeResponse(
     val id: String,
     val email: String,

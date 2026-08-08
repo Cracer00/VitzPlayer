@@ -86,11 +86,26 @@ object Users {
 
     fun setDisabled(c: Connection, id: UUID, disabled: Boolean) {
         c.exec("update users set disabled_at = ? where id = ?", if (disabled) Instant.now() else null, id)
-        if (disabled) c.exec("update sessions set revoked_at = now() where user_id = ? and revoked_at is null", id)
+        if (disabled) revokeSessions(c, id)
     }
 
     fun setPassword(c: Connection, id: UUID, password: String) {
         c.exec("update users set password_hash = ? where id = ?", Passwords.hash(password), id)
+    }
+
+    /**
+     * Смена пароля обязана выбрасывать чужие сессии: иначе увели токен — и он продолжает
+     * работать месяц, сколько пароль ни меняй. [except] оставляет ту, из которой меняли.
+     */
+    fun revokeSessions(c: Connection, userId: UUID, except: UUID? = null) {
+        if (except == null) {
+            c.exec("update sessions set revoked_at = now() where user_id = ? and revoked_at is null", userId)
+        } else {
+            c.exec(
+                "update sessions set revoked_at = now() where user_id = ? and id <> ? and revoked_at is null",
+                userId, except,
+            )
+        }
     }
 
     // --- сессии ---

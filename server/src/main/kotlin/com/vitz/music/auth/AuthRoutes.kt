@@ -2,6 +2,7 @@ package com.vitz.music.auth
 
 import com.vitz.music.ApiException
 import com.vitz.music.AppServices
+import com.vitz.music.api.ChangePasswordRequest
 import com.vitz.music.api.LoginRequest
 import com.vitz.music.api.MeResponse
 import com.vitz.music.api.RefreshRequest
@@ -86,6 +87,23 @@ fun Route.authRoutes(services: AppServices) = route("/api/v1") {
         post("/auth/logout") {
             val principal = call.principal<UserPrincipal>()!!
             dbTx { c -> Users.revokeSession(c, principal.sessionId) }
+            call.respond(HttpStatusCode.NoContent)
+        }
+
+        post("/me/password") {
+            val principal = call.principal<UserPrincipal>()!!
+            val body = call.receive<ChangePasswordRequest>()
+            if (body.newPassword.length < 8) badRequest("Новый пароль короче 8 символов")
+            dbTx { c ->
+                val user = Users.findById(c, principal.userId)
+                    ?: throw ApiException(HttpStatusCode.Unauthorized, "unauthorized")
+                if (!Passwords.verify(body.currentPassword, user.passwordHash)) {
+                    throw ApiException(HttpStatusCode.Forbidden, "wrong_password", "Текущий пароль неверен")
+                }
+                Users.setPassword(c, user.id, body.newPassword)
+                // Текущую сессию оставляем: иначе смена пароля выкидывает того, кто её и затеял.
+                Users.revokeSessions(c, user.id, except = principal.sessionId)
+            }
             call.respond(HttpStatusCode.NoContent)
         }
 

@@ -465,10 +465,20 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
         val session = call.requireAdmin() ?: return@get
         val users = dbRead { c -> Users.list(c) }
         val invites = dbRead { c -> Users.listInvites(c) }
+        val notice = call.request.queryParameters["notice"]
         call.page("Пользователи", session) {
             h1 { +"Пользователи" }
+            when (notice) {
+                "password_ok" -> p { style = "color:#4cc38a"; +"Пароль изменён, прежние сессии этого пользователя отозваны" }
+                "password_short" -> p { style = "color:#ff6b6b"; +"Пароль короче 8 символов — не менял" }
+            }
             table {
-                thead { tr { th { +"Почта" }; th { +"Имя" }; th { +"Роль" }; th { +"Статус" }; th { } } }
+                thead {
+                    tr {
+                        th { +"Почта" }; th { +"Имя" }; th { +"Роль" }; th { +"Статус" }
+                        th { +"Новый пароль" }; th { }
+                    }
+                }
                 tbody {
                     users.forEach { user ->
                         tr {
@@ -476,6 +486,17 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
                             td { +user.displayName }
                             td { +user.role }
                             td { +(if (user.disabledAt == null) "активен" else "заблокирован") }
+                            td {
+                                form(action = "/admin/users/${user.id}/password", method = FormMethod.post, classes = "inline") {
+                                    hiddenInput(name = "csrf") { value = session.csrf }
+                                    passwordInput(name = "password") {
+                                        placeholder = "не короче 8 символов"
+                                        style = "width:190px"
+                                        attributes["autocomplete"] = "new-password"
+                                    }
+                                    button(type = ButtonType.submit) { +"сменить" }
+                                }
+                            }
                             td {
                                 form(action = "/admin/users/${user.id}/toggle", method = FormMethod.post, classes = "inline") {
                                     hiddenInput(name = "csrf") { value = session.csrf }
@@ -539,6 +560,24 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
             Users.setDisabled(c, id, user.disabledAt == null)
         }
         call.respondRedirect("/admin/users")
+    }
+
+    post("/users/{id}/password") {
+        val session = call.requireAdmin() ?: return@post
+        val params = call.receiveParameters()
+        if (params["csrf"] != session.csrf) forbidden()
+        val id = UUID.fromString(call.parameters["id"])
+        val password = params["password"].orEmpty()
+        if (password.length < 8) {
+            call.respondRedirect("/admin/users?notice=password_short")
+            return@post
+        }
+        dbTx { c ->
+            Users.setPassword(c, id, password)
+            // Себе оставляем текущую сессию админки, чужие обрываем целиком.
+            Users.revokeSessions(c, id)
+        }
+        call.respondRedirect("/admin/users?notice=password_ok")
     }
 
     post("/invites") {
