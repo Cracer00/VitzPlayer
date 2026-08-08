@@ -1,3 +1,6 @@
+# Базовый набор: база и сервер. Обратного прокси здесь нет намеренно —
+# на боевом сервере его роль играет чужой Traefik (см. docker-compose.prod.yml),
+# а локально сервер слушается напрямую (docker-compose.dev.yml).
 services:
   postgres:
     image: postgres:17-alpine
@@ -17,6 +20,9 @@ services:
       - no-new-privileges:true
 
   server:
+    # На сервере образ приезжает из GHCR (VM_IMAGE подставляет scripts/deploy.sh),
+    # локально собирается этой же командой: docker compose build server.
+    image: ${VM_IMAGE:-vitz-music-server:local}
     build:
       context: .
       dockerfile: server/Dockerfile
@@ -31,7 +37,7 @@ services:
       VM_JWT_SECRET: ${VM_JWT_SECRET}
       VM_MEDIA_SIGN_SECRET: ${VM_MEDIA_SIGN_SECRET}
       VM_MEDIA_ROOT: /media
-      VM_PUBLIC_URL: https://${VM_DOMAIN}
+      VM_PUBLIC_URL: ${VM_PUBLIC_URL:-https://${VM_DOMAIN}}
       VM_BOOTSTRAP_ADMIN_EMAIL: ${VM_BOOTSTRAP_ADMIN_EMAIL:-}
       VM_BOOTSTRAP_ADMIN_PASSWORD: ${VM_BOOTSTRAP_ADMIN_PASSWORD:-}
       VM_ACCESS_TTL_MINUTES: ${VM_ACCESS_TTL_MINUTES:-15}
@@ -50,25 +56,6 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    depends_on:
-      - server
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      VM_DOMAIN: ${VM_DOMAIN}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    security_opt:
-      - no-new-privileges:true
-
 volumes:
   pgdata:
   media:
-  caddy_data:
-  caddy_config:

@@ -4,6 +4,7 @@
 «понравившееся», веб-админка для загрузки треков. Android-плеер — отдельным этапом.
 
 План целиком: [docs/MUSIC-PLAN.md](docs/MUSIC-PLAN.md).
+Развёртывание и автодеплой: [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Что уже работает
 
@@ -19,7 +20,7 @@
 | 7 | Оффлайн и загрузки на устройство | ⏳ |
 | 8 | Импортёр через headless-браузер | ⏳ |
 
-## Запуск
+## Запуск локально
 
 Нужен Docker и заполненный `.env`:
 
@@ -33,21 +34,24 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-Поднять всё:
+Поднять всё, включая сборку образа:
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-Админка — `https://<VM_DOMAIN>/admin`, вход под первым администратором из `.env`
+Админка — `http://localhost:8080/admin`, вход под первым администратором из `.env`
 (создаётся при первом старте, если в базе нет ни одного пользователя).
+
+Обратного прокси в наборе нет: локально сервер слушается напрямую, а на боевом сервере
+маршрут и сертификат даёт уже стоящий там Traefik — см. [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Разработка без Docker
 
 Нужны JDK 21+ и ffmpeg в `PATH`. База — в контейнере:
 
 ```bash
-docker compose up -d postgres
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
 ```
 
 Затем:

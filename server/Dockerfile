@@ -1,8 +1,15 @@
 # Сборка фат-джара
 FROM gradle:8.14.3-jdk21 AS build
 WORKDIR /src
+
+# Сначала только файлы сборки: пока они не менялись, слой с зависимостями переиспользуется
+# и пересборка после правки исходников не тянет полгигабайта из Maven Central заново.
 COPY settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY gradle ./gradle
+COPY shared/build.gradle.kts ./shared/
+COPY server/build.gradle.kts ./server/
+RUN gradle --no-daemon :server:dependencies --configuration runtimeClasspath > /dev/null
+
 COPY shared ./shared
 COPY server ./server
 RUN gradle --no-daemon :server:buildFatJar

@@ -1,0 +1,13 @@
+# На Windows включён core.autocrlf=true, и без этого файла shell-скрипты после клона
+# приезжают с CRLF. На сервере такой скрипт падает с «$'\r': command not found» —
+# ошибка невнятная, а ищется долго. Всё, что исполняется в Linux, держим в LF.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Caddyfile       text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.env.example    text eol=lf
+gradlew         text eol=lf
+
+*.jar           binary
+*.bat           text eol=crlf

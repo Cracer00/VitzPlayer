@@ -1,0 +1,37 @@
+# Боевой оверлей: сервер встраивается в Traefik, который уже стоит на машине (Dokploy).
+#
+# Своего Caddy не поднимаем: 80 и 443 заняты dokploy-traefik, а второй прокси на тех же
+# портах — это просто конфликт. Traefik сам выдаст сертификат по httpChallenge.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Ожидания к окружению (проверено на этом сервере):
+#   сеть        dokploy-network, overlay, attachable=true
+#   entrypoints web (:80) и websecure (:443)
+#   резолвер    letsencrypt
+# Если Dokploy переименует что-то из этого — править здесь.
+services:
+  server:
+    networks:
+      - default
+      - dokploy
+    labels:
+      traefik.enable: "true"
+      # Контейнер в двух сетях, поэтому Traefik надо явно сказать, в какой его искать.
+      traefik.docker.network: "dokploy-network"
+
+      traefik.http.routers.vitzmusic.rule: "Host(`${VM_DOMAIN}`)"
+      traefik.http.routers.vitzmusic.entrypoints: "websecure"
+      traefik.http.routers.vitzmusic.tls.certresolver: "letsencrypt"
+      traefik.http.services.vitzmusic.loadbalancer.server.port: "8080"
+
+      # http → https
+      traefik.http.routers.vitzmusic-http.rule: "Host(`${VM_DOMAIN}`)"
+      traefik.http.routers.vitzmusic-http.entrypoints: "web"
+      traefik.http.routers.vitzmusic-http.middlewares: "vitzmusic-https@docker"
+      traefik.http.middlewares.vitzmusic-https.redirectscheme.scheme: "https"
+
+networks:
+  dokploy:
+    name: dokploy-network
+    external: true
