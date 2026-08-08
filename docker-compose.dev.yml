@@ -1,0 +1,9 @@
+# Оверлей для разработки: сервер запускается с машины (./gradlew :server:run),
+# в контейнере нужна только база — поэтому её порт публикуется наружу.
+# Порт 5434, а не 5432: на машине разработки обычно уже висит чужой Postgres.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
+services:
+  postgres:
+    ports:
+      - "5434:5432"

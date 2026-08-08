@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      VM_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      VM_DB_USER: ${POSTGRES_USER}
+      VM_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      VM_JWT_SECRET: ${VM_JWT_SECRET}
+      VM_MEDIA_SIGN_SECRET: ${VM_MEDIA_SIGN_SECRET}
+      VM_MEDIA_ROOT: /media
+      VM_PUBLIC_URL: https://${VM_DOMAIN}
+      VM_BOOTSTRAP_ADMIN_EMAIL: ${VM_BOOTSTRAP_ADMIN_EMAIL:-}
+      VM_BOOTSTRAP_ADMIN_PASSWORD: ${VM_BOOTSTRAP_ADMIN_PASSWORD:-}
+      VM_ACCESS_TTL_MINUTES: ${VM_ACCESS_TTL_MINUTES:-15}
+      VM_REFRESH_TTL_DAYS: ${VM_REFRESH_TTL_DAYS:-30}
+      VM_SIGN_TTL_SECONDS: ${VM_SIGN_TTL_SECONDS:-21600}
+      VM_UPLOAD_MAX_BYTES: ${VM_UPLOAD_MAX_BYTES:-209715200}
+      VM_WORKER_CONCURRENCY: ${VM_WORKER_CONCURRENCY:-2}
+    volumes:
+      - media:/media
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      VM_DOMAIN: ${VM_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pgdata:
+  media:
+  caddy_data:
+  caddy_config:
