@@ -436,8 +436,48 @@ object Catalog {
         }
     }
 
+    /**
+     * Удаление в корзину. Строка остаётся надгробием: по нему плеер на синхронизации узнаёт,
+     * что трек надо убрать у себя. Файлы стирает [com.vitz.music.media.MediaGc], когда срок выйдет.
+     */
     fun softDeleteTrack(c: Connection, id: UUID) {
         c.exec("update tracks set deleted_at = now(), updated_at = now() where id = ? and deleted_at is null", id)
+    }
+
+    /**
+     * Возврат из корзины. Может не выйти: пока трек лежал удалённым, тот же файл могли залить
+     * заново, а частичный уникальный индекс по `audio_sha256` двух живых строк не допускает.
+     */
+    fun restoreTrack(c: Connection, id: UUID): Boolean =
+        c.exec("update tracks set deleted_at = null, updated_at = now() where id = ? and deleted_at is not null", id) > 0
+
+    data class DeletedTrack(
+        val id: UUID,
+        val title: String,
+        val artistName: String,
+        val deletedAt: Instant,
+        val sizeBytes: Long,
+    )
+
+    fun listDeletedTracks(c: Connection, limit: Int): List<DeletedTrack> = c.select(
+        """
+        select t.id, t.title, a.name as artist_name, t.deleted_at,
+               coalesce((select sum(r.size_bytes) from renditions r where r.track_id = t.id), 0) as size_bytes
+        from tracks t
+        join artists a on a.id = t.artist_id
+        where t.deleted_at is not null
+        order by t.deleted_at desc
+        limit ?
+        """.trimIndent(),
+        limit,
+    ) { rs ->
+        DeletedTrack(
+            id = rs.uuid("id"),
+            title = rs.getString("title"),
+            artistName = rs.getString("artist_name"),
+            deletedAt = rs.getTimestamp("deleted_at").toInstant(),
+            sizeBytes = rs.getLong("size_bytes"),
+        )
     }
 
     @Suppress("LongParameterList")

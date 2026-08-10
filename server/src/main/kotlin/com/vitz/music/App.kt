@@ -14,6 +14,7 @@ import com.vitz.music.ingest.Ffmpeg
 import com.vitz.music.ingest.IngestService
 import com.vitz.music.jobs.JobQueue
 import com.vitz.music.jobs.JobWorker
+import com.vitz.music.media.MediaGc
 import com.vitz.music.media.MediaStore
 import com.vitz.music.media.UrlSigner
 import com.vitz.music.media.mediaRoutes
@@ -57,6 +58,7 @@ class AppServices(val cfg: Config) {
     val ffmpeg = Ffmpeg(cfg.ffmpeg, cfg.ffprobe)
     val queue = JobQueue()
     val ingest = IngestService(store, ffmpeg, cfg)
+    val gc = MediaGc(store, cfg)
 }
 
 fun Application.module(cfg: Config) {
@@ -152,6 +154,7 @@ fun Application.module(cfg: Config) {
     }
 
     JobWorker(services, workerScope).start()
+    services.gc.start(workerScope)
 }
 
 class ApiException(

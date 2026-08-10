@@ -20,6 +20,9 @@ data class Config(
     val signTtlSeconds: Long,
     val uploadMaxBytes: Long,
     val workerConcurrency: Int,
+    val trashRetentionDays: Long,
+    val gcIntervalMinutes: Long,
+    val gcOrphanGraceHours: Long,
     val ffmpeg: String,
     val ffprobe: String,
     val bootstrapAdminEmail: String?,
@@ -50,6 +53,9 @@ data class Config(
                 signTtlSeconds = num("VM_SIGN_TTL_SECONDS", 6 * 3600),
                 uploadMaxBytes = num("VM_UPLOAD_MAX_BYTES", 200L * 1024 * 1024),
                 workerConcurrency = num("VM_WORKER_CONCURRENCY", 2).toInt(),
+                trashRetentionDays = num("VM_TRASH_RETENTION_DAYS", 30),
+                gcIntervalMinutes = num("VM_GC_INTERVAL_MINUTES", 360),
+                gcOrphanGraceHours = num("VM_GC_ORPHAN_GRACE_HOURS", 24),
                 ffmpeg = str("VM_FFMPEG", "ffmpeg"),
                 ffprobe = str("VM_FFPROBE", "ffprobe"),
                 bootstrapAdminEmail = env["VM_BOOTSTRAP_ADMIN_EMAIL"]?.takeIf { it.isNotBlank() },
@@ -69,5 +75,9 @@ data class Config(
         require(jwtSecret.length >= 32) { "VM_JWT_SECRET короче 32 символов" }
         require(signSecret.length >= 32) { "VM_MEDIA_SIGN_SECRET короче 32 символов" }
         require(jwtSecret != signSecret || isLocal) { "Секреты JWT и подписи ссылок должны различаться" }
+        require(trashRetentionDays >= 0) { "VM_TRASH_RETENTION_DAYS не может быть отрицательным" }
+        // Ингест кладёт файл в хранилище до записи в базу, и в этом промежутке файл выглядит
+        // бесхозным. Отсрочка меньше часа означает уборку прямо из-под работающего ингеста.
+        require(gcOrphanGraceHours >= 1) { "VM_GC_ORPHAN_GRACE_HOURS меньше часа — уборка снесёт файлы на ингесте" }
     }
 }

@@ -13,10 +13,12 @@ import com.vitz.music.forbidden
 import com.vitz.music.jobs.IngestPayload
 import com.vitz.music.jobs.JOB_INGEST
 import com.vitz.music.jobs.JobRow
+import com.vitz.music.media.MediaGc
 import com.vitz.music.media.coverUrl
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.log
 import io.ktor.server.html.respondHtml
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.request.receiveParameters
@@ -72,6 +74,8 @@ import kotlinx.html.tr
 import kotlinx.html.ul
 import kotlinx.serialization.json.Json
 import java.nio.file.Files
+import java.sql.SQLException
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -150,6 +154,7 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
                 "Альбомов" to c.count("select count(*) from albums"),
                 "Пользователей" to c.count("select count(*) from users"),
                 "Плейлистов" to c.count("select count(*) from playlists where deleted_at is null"),
+                "В корзине" to c.count("select count(*) from tracks where deleted_at is not null"),
             )
         }
         val bytes = dbRead { c ->
@@ -312,6 +317,7 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
         }
         call.page("Каталог", session) {
             h1 { +"Каталог" }
+            p("muted") { +"Удалённое уезжает в корзину и стирается с диска через ${cfg.trashRetentionDays} дн." }
             form(action = "/admin/tracks", method = FormMethod.get) {
                 div("row") {
                     textInput(name = "q") { placeholder = "поиск по названию и исполнителю"; value = query }
@@ -407,6 +413,104 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
         val id = UUID.fromString(call.parameters["id"])
         dbTx { c -> Catalog.softDeleteTrack(c, id) }
         call.respondRedirect("/admin/tracks")
+    }
+
+    // ---------- корзина ----------
+
+    get("/trash") {
+        val session = call.requireAdmin() ?: return@get
+        val rows = dbRead { c -> Catalog.listDeletedTracks(c, 200) }
+        val notice = call.request.queryParameters["notice"]
+        val report = services.gc.last
+        call.page("Корзина", session) {
+            h1 { +"Корзина" }
+            when (notice) {
+                "restored" -> p { style = "color:#4cc38a"; +"Трек вернулся в каталог" }
+                "restore_conflict" -> p { style = "color:#ff6b6b"; +"Такой же файл уже залит заново — вернуть нельзя" }
+                "purged" -> p { style = "color:#4cc38a"; +"Стёрто: ${report?.let { describe(it) } ?: "готово"}" }
+                "swept" -> p { style = "color:#4cc38a"; +"Уборка прошла: ${report?.let { describe(it) } ?: "готово"}" }
+            }
+            p("muted") {
+                +"Удалённый трек лежит здесь ${cfg.trashRetentionDays} дн. — за это время плеер успевает "
+                +"забрать на синхронизации, что трека больше нет, и убрать его у себя. Потом строка и "
+                +"файлы стираются с диска насовсем. Файл уходит только если на него не ссылается "
+                +"никакой другой трек: побайтовые копии в хранилище общие."
+            }
+            div("row") {
+                form(action = "/admin/trash/sweep", method = FormMethod.post, classes = "inline") {
+                    hiddenInput(name = "csrf") { value = session.csrf }
+                    button(type = ButtonType.submit) { +"Прибраться сейчас" }
+                }
+                report?.let {
+                    span("muted") { +"последняя уборка ${timeFormat.format(it.at)}: ${describe(it)}" }
+                }
+            }
+            if (rows.isEmpty()) {
+                p("muted") { +"Пусто" }
+                return@page
+            }
+            table {
+                thead {
+                    tr { th { +"Исполнитель" }; th { +"Название" }; th { +"Удалён" }; th { +"Занимает" }; th { } }
+                }
+                tbody {
+                    rows.forEach { track ->
+                        tr {
+                            td { +track.artistName }
+                            td { +track.title }
+                            td {
+                                +timeFormat.format(track.deletedAt)
+                                span("muted") { +" · ${untilPurge(track.deletedAt, cfg.trashRetentionDays)}" }
+                            }
+                            td { +formatBytes(track.sizeBytes) }
+                            td {
+                                form(action = "/admin/trash/${track.id}/restore", method = FormMethod.post, classes = "inline") {
+                                    hiddenInput(name = "csrf") { value = session.csrf }
+                                    button(type = ButtonType.submit) { +"вернуть" }
+                                }
+                                +" "
+                                form(action = "/admin/trash/${track.id}/purge", method = FormMethod.post, classes = "inline") {
+                                    hiddenInput(name = "csrf") { value = session.csrf }
+                                    button(classes = "danger", type = ButtonType.submit) { +"стереть насовсем" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post("/trash/{id}/restore") {
+        val session = call.requireAdmin() ?: return@post
+        val params = call.receiveParameters()
+        if (params["csrf"] != session.csrf) forbidden()
+        val id = UUID.fromString(call.parameters["id"])
+        val restored = try {
+            dbTx { c -> Catalog.restoreTrack(c, id) }
+        } catch (e: SQLException) {
+            // Единственная ожидаемая причина — уникальный индекс по audio_sha256.
+            call.application.log.info("Трек $id вернуть не вышло: ${e.message}")
+            false
+        }
+        call.respondRedirect("/admin/trash?notice=" + if (restored) "restored" else "restore_conflict")
+    }
+
+    post("/trash/{id}/purge") {
+        val session = call.requireAdmin() ?: return@post
+        val params = call.receiveParameters()
+        if (params["csrf"] != session.csrf) forbidden()
+        val id = UUID.fromString(call.parameters["id"])
+        withContext(Dispatchers.IO) { services.gc.purgeTrack(id) }
+        call.respondRedirect("/admin/trash?notice=purged")
+    }
+
+    post("/trash/sweep") {
+        val session = call.requireAdmin() ?: return@post
+        val params = call.receiveParameters()
+        if (params["csrf"] != session.csrf) forbidden()
+        withContext(Dispatchers.IO) { services.gc.runOnce() }
+        call.respondRedirect("/admin/trash?notice=swept")
     }
 
     // ---------- исполнители ----------
@@ -652,6 +756,7 @@ private suspend fun ApplicationCall.page(
                 a(href = "/admin/upload") { +"Загрузка" }
                 a(href = "/admin/tracks") { +"Каталог" }
                 a(href = "/admin/artists") { +"Исполнители" }
+                a(href = "/admin/trash") { +"Корзина" }
                 a(href = "/admin/users") { +"Пользователи" }
             }
             div("spacer")
@@ -692,6 +797,29 @@ private fun kotlinx.html.TBODY.jobRow(job: JobRow, csrf: String) {
                 }
             }
         }
+    }
+}
+
+private fun describe(report: MediaGc.Report): String = buildString {
+    if (report.isEmpty) {
+        append("нечего было убирать")
+        return@buildString
+    }
+    val parts = buildList {
+        if (report.tracksPurged > 0) add("треков ${report.tracksPurged}")
+        if (report.filesDeleted > 0) add("файлов ${report.filesDeleted} на ${formatBytes(report.bytesFreed)}")
+        if (report.tempDeleted > 0) add("временных ${report.tempDeleted}")
+        if (report.rowsDeleted > 0) add("пустых записей ${report.rowsDeleted}")
+    }
+    append(parts.joinToString(", "))
+}
+
+private fun untilPurge(deletedAt: Instant, retentionDays: Long): String {
+    val left = Duration.between(Instant.now(), deletedAt.plus(Duration.ofDays(retentionDays)))
+    return when {
+        left.isNegative || left.isZero -> "стирается ближайшей уборкой"
+        left.toDays() > 0 -> "стирается через ${left.toDays()} дн."
+        else -> "стирается через ${left.toHours()} ч"
     }
 }
 

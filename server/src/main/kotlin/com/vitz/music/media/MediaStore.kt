@@ -42,7 +42,39 @@ class MediaStore(val root: Path) {
         return target
     }
 
-    fun delete(kind: String, sha: String, ext: String): Boolean = Files.deleteIfExists(path(kind, sha, ext))
+    /**
+     * Удаляет все файлы этого sha в разделе. Именно все, а не один: расширение оригинала
+     * заранее неизвестно, а обложка лежит вариантами `<sha>.<размер>.webp`.
+     */
+    fun deleteBySha(kind: String, sha: String): Swept {
+        if (sha.length < 4) return Swept(0, 0)
+        val dir = root.resolve(kind).resolve(sha.substring(0, 2)).resolve(sha.substring(2, 4))
+        if (!Files.isDirectory(dir)) return Swept(0, 0)
+        var files = 0
+        var bytes = 0L
+        Files.newDirectoryStream(dir, "$sha.*").use { stream ->
+            for (path in stream) {
+                val size = runCatching { Files.size(path) }.getOrDefault(0L)
+                if (runCatching { Files.deleteIfExists(path) }.getOrDefault(false)) {
+                    files++
+                    bytes += size
+                }
+            }
+        }
+        return Swept(files, bytes)
+    }
+
+    /**
+     * Обход всех файлов раздела. Список снимается целиком до первого вызова: уборка удаляет
+     * файлы прямо в обходе, а ленивый `Files.walk` такого под собой не любит.
+     * Опустевшие каталоги остаются — их пара сотен, места они не занимают.
+     */
+    fun forEachFile(kind: String, action: (Path) -> Unit) {
+        val dir = root.resolve(kind)
+        if (!Files.isDirectory(dir)) return
+        val files = Files.walk(dir).use { stream -> stream.filter { Files.isRegularFile(it) }.toList() }
+        files.forEach(action)
+    }
 
     /** Файл для приёма загрузки: живёт до тех пор, пока задание ингеста его не разберёт. */
     fun incoming(ext: String): Path {
