@@ -69,6 +69,24 @@ fun resolveAppVersion(): AppVersion {
 
 val appVersion = resolveAppVersion()
 
+/**
+ * Ключ подписи релизов лежит вне репозитория, пути и пароли — в local.properties.
+ *
+ * Ключ обязан быть постоянным: Android ставит обновление поверх, только если новая сборка
+ * подписана тем же ключом, что и установленная. Отладочный ключ генерируется на каждой машине
+ * свой, поэтому для самообновления он не годится.
+ */
+fun releaseSigningProperties(): Properties? {
+    val localProperties = rootProject.file("local.properties")
+    if (!localProperties.exists()) return null
+
+    val props = Properties().apply { localProperties.inputStream().use { load(it) } }
+    val storePath = props.getProperty("release.storeFile") ?: return null
+    return if (rootProject.file(storePath).exists()) props else null
+}
+
+val releaseSigning = releaseSigningProperties()
+
 android {
     namespace = "com.vitz.music.app"
     compileSdk = 36
@@ -85,6 +103,17 @@ android {
         versionName = appVersion.name
     }
 
+    signingConfigs {
+        releaseSigning?.let { props ->
+            create("release") {
+                storeFile = rootProject.file(props.getProperty("release.storeFile"))
+                storePassword = props.getProperty("release.storePassword")
+                keyAlias = props.getProperty("release.keyAlias")
+                keyPassword = props.getProperty("release.keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // Ставится рядом с релизной, как и у приборки.
@@ -93,6 +122,9 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Без ключа сборка не падает, а подписывается отладочным: собрать проект должно
+            // быть возможно и на машине, где ключа нет. Но такой APK обновлением не станет.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
@@ -109,6 +141,8 @@ android {
 
     buildFeatures {
         compose = true
+        // Нужен, чтобы приложение знало свою версию и могло сравнить её с опубликованной.
+        buildConfig = true
     }
 
     packaging {
@@ -117,6 +151,76 @@ android {
             "/META-INF/INDEX.LIST",
             "/META-INF/io.netty.versions.properties",
         )
+    }
+}
+
+/**
+ * Кладёт свежий debug-APK в dist/ под именем с версией и убирает предыдущий,
+ * чтобы на диске всегда лежала ровно одна, заведомо актуальная сборка.
+ */
+val distDirectory = rootProject.layout.projectDirectory.dir("dist")
+
+val copyDebugApkToDist = tasks.register<Copy>("copyDebugApkToDist") {
+    from(layout.buildDirectory.file("outputs/apk/debug/android-debug.apk"))
+    into(distDirectory)
+    rename { "VitzMusic-${appVersion.name}-debug.apk" }
+    doFirst {
+        delete(fileTree(distDirectory) { include("VitzMusic-*-debug.apk") })
+    }
+}
+
+// matching/configureEach, а не named: задачи вариантов регистрирует AGP уже после того,
+// как этот файл выполнен, и обращение по имени здесь ещё не находит их.
+tasks.matching { it.name == "assembleDebug" }.configureEach { finalizedBy(copyDebugApkToDist) }
+
+/**
+ * Готовит артефакты релиза для публикации: APK под постоянным именем и манифест версии.
+ *
+ * Имена файлов постоянные, потому что приложение ходит по ссылкам вида
+ * `/releases/latest/download/<имя>` — они всегда указывают на последний релиз и не требуют
+ * обращения к API GitHub.
+ */
+val prepareReleaseArtifacts = tasks.register("prepareReleaseArtifacts") {
+    group = "distribution"
+    description = "Собирает подписанный APK и version.json в dist/release"
+
+    dependsOn("assembleRelease")
+
+    val outputDirectory = rootProject.layout.projectDirectory.dir("dist/release")
+    val apkSource = layout.buildDirectory.file("outputs/apk/release/android-release.apk")
+
+    // Описание релиза приходит из скрипта выпуска: -PreleaseNotes="...".
+    val notes = (project.findProperty("releaseNotes") as String?).orEmpty()
+
+    doLast {
+        val target = outputDirectory.asFile
+        target.mkdirs()
+
+        val apk = apkSource.get().asFile
+        val published = target.resolve("VitzMusic-release.apk")
+        apk.copyTo(published, overwrite = true)
+
+        val escapedNotes = notes
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "")
+
+        target.resolve("version.json").writeText(
+            """
+            {
+              "versionName": "${appVersion.name}",
+              "versionCode": ${appVersion.code},
+              "sizeBytes": ${published.length()},
+              "notes": "$escapedNotes"
+            }
+            """.trimIndent() + "\n"
+        )
+
+        logger.lifecycle("Артефакты релиза ${appVersion.name} (${appVersion.code}) готовы: ${target.absolutePath}")
+        if (releaseSigning == null) {
+            logger.warn("ВНИМАНИЕ: ключ подписи не найден, APK подписан отладочным — обновлением он не станет")
+        }
     }
 }
 

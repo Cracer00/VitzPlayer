@@ -8,6 +8,9 @@
     <!-- Без него на Android 13+ уведомление плеера не появится, а музыка играть будет. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Самообновление: скачивание сборки и установка её поверх текущей. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:name=".VitzMusicApp"
         android:allowBackup="false"
@@ -40,5 +43,23 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!--
+            Кнопки магнитолы и руля, когда приложение не запущено. Без этого приёмника
+            нажатие на «играть» в выключенном приложении не поднимает службу: событие
+            некому принять, и музыка молчит.
+        -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Результат системного установщика: подтверждение установки и коды ошибок. -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
     </application>
 </manifest>

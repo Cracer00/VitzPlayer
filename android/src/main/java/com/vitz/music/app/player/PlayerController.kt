@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.media3.common.HeartRating
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -27,7 +28,12 @@ import kotlinx.coroutines.launch
  * не шлёт, а перерисовывать чаще незачем — цифры секунд всё равно меняются раз в секунду.
  */
 @UnstableApi
-class PlayerController(private val context: Context, private val scope: CoroutineScope) {
+class PlayerController(
+    private val context: Context,
+    private val scope: CoroutineScope,
+    /** Путь к скачанному файлу, если он есть. Без сети играет только он. */
+    private val localPath: (String) -> String? = { null },
+) {
 
     private var controller: MediaController? = null
 
@@ -40,6 +46,8 @@ class PlayerController(private val context: Context, private val scope: Coroutin
     var artworkUri by mutableStateOf<String?>(null)
         private set
     var isPlaying by mutableStateOf(false)
+        private set
+    var liked by mutableStateOf(false)
         private set
     var durationMs by mutableLongStateOf(0L)
         private set
@@ -93,6 +101,14 @@ class PlayerController(private val context: Context, private val scope: Coroutin
 
     private fun readState(player: Player) {
         val item = player.currentMediaItem
+
+        // Сердечко перечитываем только при смене трека. Внутри одного трека верна отметка,
+        // поставленная руками: в метаданных очереди она осталась той, что была при запуске,
+        // и перечитывание на каждое событие гасило бы её обратно.
+        if (item?.mediaId != currentTrackId) {
+            liked = (item?.mediaMetadata?.userRating as? HeartRating)?.isHeart == true
+        }
+
         currentTrackId = item?.mediaId
         title = item?.mediaMetadata?.title?.toString()
         artist = item?.mediaMetadata?.artist?.toString()
@@ -116,8 +132,8 @@ class PlayerController(private val context: Context, private val scope: Coroutin
 
         // Индекс считаем по тому же списку, из которого собраны элементы: если у части треков
         // не оказалось ссылок, индексы исходной очереди уже не совпадают с итоговыми.
-        val playable = queue.filter { it.media.isNotEmpty() }
-        val items = playable.mapNotNull { it.toMediaItem() }
+        val playable = queue.filter { it.media.isNotEmpty() || localPath(it.id) != null }
+        val items = playable.mapNotNull { it.toMediaItem(localPath(it.id)) }
         if (items.isEmpty()) return
         val startIndex = playable.indexOfFirst { it.id == track.id }.coerceAtLeast(0)
 
@@ -131,6 +147,21 @@ class PlayerController(private val context: Context, private val scope: Coroutin
     fun togglePlayPause() {
         val controller = controller ?: return
         if (controller.isPlaying) controller.pause() else controller.play()
+    }
+
+    /**
+     * Отметка «нравится» уходит штатным `setRating` — тем же путём, которым её ставит
+     * приборка. Сохраняет её служба: у неё есть авторизованный клиент, а экрану знать
+     * ни адреса сервера, ни токенов незачем.
+     *
+     * Сердечко перекрашивается сразу, не дожидаясь ответа: ждать сети ради галочки нечего,
+     * а расхождение выправит ближайшая синхронизация.
+     */
+    fun toggleLike() {
+        val controller = controller ?: return
+        val desired = !liked
+        liked = desired
+        controller.setRating(HeartRating(desired))
     }
 
     fun next() = controller?.seekToNextMediaItem()
@@ -149,17 +180,23 @@ class PlayerController(private val context: Context, private val scope: Coroutin
  * если рендиция почему-то не сделалась.
  */
 @UnstableApi
-fun TrackDto.toMediaItem(): MediaItem? {
-    val link = media.firstOrNull { it.rendition == "opus-96" } ?: media.firstOrNull() ?: return null
+fun TrackDto.toMediaItem(localPath: String? = null): MediaItem? {
+    // Скачанный файл в приоритете: он играет без сети и не зависит от срока жизни подписи.
+    val uri = localPath?.let { android.net.Uri.fromFile(java.io.File(it)).toString() }
+        ?: (media.firstOrNull { it.rendition == "opus-96" } ?: media.firstOrNull())?.url
+        ?: return null
     return MediaItem.Builder()
         .setMediaId(id)
-        .setUri(link.url)
+        .setUri(uri)
         .setMediaMetadata(
             MediaMetadata.Builder()
                 .setTitle(title)
                 .setArtist(artist)
                 .setAlbumTitle(album)
                 .setArtworkUri(coverUrl?.let { android.net.Uri.parse(it) })
+                // Отметка «нравится» едет в метаданных: по ней приборка рисует сердечко,
+                // не обращаясь к серверу самостоятельно.
+                .setUserRating(androidx.media3.common.HeartRating(liked))
                 .setIsBrowsable(false)
                 .setIsPlayable(true)
                 .build(),

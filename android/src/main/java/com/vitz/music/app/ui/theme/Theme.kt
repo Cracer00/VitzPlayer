@@ -8,6 +8,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import com.vitz.music.app.data.ThemeMode
 
 /**
  * Палитра намеренно та же, что у Vitz Dashboard: приложения стоят на одном планшете в машине
@@ -74,6 +75,20 @@ val VitzMusicTypography = Typography(
     titleMedium = Typography().titleMedium.copy(fontWeight = FontWeight.SemiBold),
     labelLarge = Typography().labelLarge.copy(fontWeight = FontWeight.Medium),
 )
+
+/** Тема из настроек: в машине системная не годится, там почти всегда нужна тёмная. */
+@Composable
+fun VitzMusicTheme(
+    mode: ThemeMode,
+    content: @Composable () -> Unit,
+) {
+    val dark = when (mode) {
+        ThemeMode.DARK -> true
+        ThemeMode.LIGHT -> false
+        ThemeMode.AUTO -> isSystemInDarkTheme()
+    }
+    VitzMusicTheme(darkTheme = dark, content = content)
+}
 
 @Composable
 fun VitzMusicTheme(

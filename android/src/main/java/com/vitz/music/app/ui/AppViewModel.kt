@@ -9,17 +9,30 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.vitz.music.api.MeResponse
+import com.vitz.music.app.VitzMusicApp
 import com.vitz.music.app.data.ApiClient
 import com.vitz.music.app.data.ApiException
+import com.vitz.music.app.data.AutoDownloader
+import com.vitz.music.app.data.Downloads
+import com.vitz.music.app.data.SyncService
+import com.vitz.music.app.data.TokenStore
 import kotlinx.coroutines.launch
 
 sealed interface AppState {
     data object Loading : AppState
     data class LoggedOut(val serverUrl: String, val error: String? = null, val busy: Boolean = false) : AppState
-    data class LoggedIn(val me: MeResponse) : AppState
+
+    /** [offline] — вошли по сохранённому профилю, сервер недоступен. */
+    data class LoggedIn(val me: MeResponse, val offline: Boolean = false) : AppState
 }
 
-class AppViewModel(private val api: ApiClient) : ViewModel() {
+class AppViewModel(
+    private val api: ApiClient,
+    private val store: TokenStore,
+    private val sync: SyncService,
+    private val downloads: Downloads,
+    private val autoDownloader: AutoDownloader,
+) : ViewModel() {
 
     var state: AppState by mutableStateOf(AppState.Loading)
         private set
@@ -32,6 +45,10 @@ class AppViewModel(private val api: ApiClient) : ViewModel() {
      * На старте пробуем восстановить сессию. Токен доступа живёт 15 минут, так что после
      * ночи в кармане он почти всегда протух — клиент сам сходит за новым по refresh,
      * и пользователь ничего не заметит.
+     *
+     * Главное здесь — отсутствие сети не должно упирать в экран входа. Токены на месте,
+     * каталог лежит в зеркале, скачанное лежит на диске: музыке нечего ждать от сервера.
+     * На экран входа возвращаемся только когда сервер прямо сказал, что сессия недействительна.
      */
     private fun restore() {
         viewModelScope.launch {
@@ -39,19 +56,58 @@ class AppViewModel(private val api: ApiClient) : ViewModel() {
                 state = AppState.LoggedOut(api.serverUrl() ?: DEFAULT_SERVER)
                 return@launch
             }
-            state = runCatching { AppState.LoggedIn(api.me()) }
-                .getOrElse { error ->
-                    when {
-                        error is ApiException && error.status == 401 ->
-                            AppState.LoggedOut(api.serverUrl() ?: DEFAULT_SERVER)
-                        // Нет сети — это не повод выкидывать сессию: попросим повторить.
-                        else -> AppState.LoggedOut(
-                            serverUrl = api.serverUrl() ?: DEFAULT_SERVER,
-                            error = error.readableMessage(),
-                        )
-                    }
+
+            state = runCatching {
+                val me = api.me()
+                store.saveProfile(me.email, me.displayName, me.role)
+                AppState.LoggedIn(me)
+            }.getOrElse { error ->
+                when {
+                    error is ApiException && error.status == 401 ->
+                        AppState.LoggedOut(api.serverUrl() ?: DEFAULT_SERVER)
+
+                    else -> offlineState() ?: AppState.LoggedOut(
+                        serverUrl = api.serverUrl() ?: DEFAULT_SERVER,
+                        error = error.readableMessage(),
+                    )
                 }
+            }
+
+            if (state is AppState.LoggedIn) refreshCatalog()
         }
+    }
+
+    /** Вход по сохранённому профилю. Без него в оффлайне не с чем открывать библиотеку. */
+    private fun offlineState(): AppState.LoggedIn? {
+        val (email, name, role) = store.loadProfile() ?: return null
+        return AppState.LoggedIn(
+            me = MeResponse(id = "", email = email, displayName = name, role = role),
+            offline = true,
+        )
+    }
+
+    /** Обновление зеркала в фоне: экран уже показан, ждать синхронизацию незачем. */
+    private fun refreshCatalog() {
+        viewModelScope.launch {
+            val received = sync.sync()
+            val current = state
+            if (current is AppState.LoggedIn) {
+                // Синхронизация прошла — значит сервер на связи, отметку «оффлайн» снимаем.
+                state = current.copy(offline = received < 0)
+            }
+            // Зеркало обновилось — самое время сверить загрузки с диском и догрузить
+            // недостающее. Свои предохранители (тип сети, свободное место) автозагрузка
+            // проверяет сама.
+            if (received >= 0) {
+                downloads.reconcile()
+                autoDownloader.start()
+            }
+        }
+    }
+
+    /** Повторная попытка достучаться до сервера — по кнопке в полосе «нет связи». */
+    fun retryConnection() {
+        if (state is AppState.LoggedIn) refreshCatalog() else restore()
     }
 
     fun login(serverUrl: String, email: String, password: String) {
@@ -60,10 +116,13 @@ class AppViewModel(private val api: ApiClient) : ViewModel() {
         state = current.copy(busy = true, error = null)
         viewModelScope.launch {
             state = runCatching {
-                AppState.LoggedIn(api.login(serverUrl, email, password, device = deviceName()))
+                val me = api.login(serverUrl, email, password, device = deviceName())
+                store.saveProfile(me.email, me.displayName, me.role)
+                AppState.LoggedIn(me)
             }.getOrElse { error ->
                 current.copy(busy = false, error = error.readableMessage())
             }
+            if (state is AppState.LoggedIn) refreshCatalog()
         }
     }
 
@@ -86,8 +145,8 @@ class AppViewModel(private val api: ApiClient) : ViewModel() {
     companion object {
         const val DEFAULT_SERVER = "https://music.nethound.ru"
 
-        fun factory(api: ApiClient) = viewModelFactory {
-            initializer { AppViewModel(api) }
+        fun factory(app: VitzMusicApp) = viewModelFactory {
+            initializer { AppViewModel(app.api, app.tokenStore, app.sync, app.downloads, app.autoDownloader) }
         }
     }
 }

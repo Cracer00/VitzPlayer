@@ -34,8 +34,8 @@ class MainActivity : ComponentActivity() {
         requestNotificationsIfNeeded()
         val app = application as VitzMusicApp
         setContent {
-            VitzMusicTheme {
-                val model: AppViewModel = viewModel(factory = AppViewModel.factory(app.api))
+            VitzMusicTheme(mode = app.settings.theme) {
+                val model: AppViewModel = viewModel(factory = AppViewModel.factory(app))
                 Scaffold(modifier = Modifier.fillMaxSize()) { padding ->
                     AppRoot(model, app, Modifier.padding(padding))
                 }
@@ -73,6 +73,8 @@ private fun AppRoot(model: AppViewModel, app: VitzMusicApp, modifier: Modifier =
         is AppState.LoggedIn -> MainScreen(
             me = state.me,
             app = app,
+            offline = state.offline,
+            onRetryConnection = model::retryConnection,
             onLogout = model::logout,
             modifier = modifier,
         )

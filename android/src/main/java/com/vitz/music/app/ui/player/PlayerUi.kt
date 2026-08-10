@@ -8,11 +8,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -86,7 +90,10 @@ fun PlayerScreen(player: PlayerController, modifier: Modifier = Modifier) {
     val position = if (dragging) dragPosition.toLong() else player.positionMs
 
     Column(
-        modifier = modifier.fillMaxSize().padding(24.dp),
+        // Та же беда, что была на «Загрузках»: обложка с кнопками не помещаются в высоту
+        // экрана магнитолы, и без прокрутки кнопка «играть» уезжала за нижний край.
+        // Контент короче экрана по-прежнему стоит по центру.
+        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -127,6 +134,18 @@ fun PlayerScreen(player: PlayerController, modifier: Modifier = Modifier) {
             horizontalArrangement = Arrangement.spacedBy(24.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            IconButton(onClick = player::toggleLike, modifier = Modifier.size(64.dp)) {
+                Icon(
+                    if (player.liked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = if (player.liked) "Убрать из понравившихся" else "В понравившиеся",
+                    tint = if (player.liked) {
+                        MaterialTheme.colorScheme.tertiary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.size(36.dp),
+                )
+            }
             IconButton(onClick = { player.previous() }, enabled = player.hasPrevious, modifier = Modifier.size(64.dp)) {
                 Icon(Icons.Filled.SkipPrevious, contentDescription = "Предыдущий", modifier = Modifier.size(40.dp))
             }

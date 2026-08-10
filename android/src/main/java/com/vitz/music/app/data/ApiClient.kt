@@ -81,6 +81,12 @@ class ApiClient(private val store: TokenStore) {
 
     suspend fun me(): MeResponse = get("/api/v1/me")
 
+    /**
+     * Скачивание по готовому адресу. Ссылки на медиа уже подписаны, заголовок авторизации
+     * им не нужен и только мешал бы: тот же адрес используется плеером и менеджером загрузок.
+     */
+    suspend fun getRaw(url: String): HttpResponse = http.request(url) { method = HttpMethod.Get }
+
     suspend fun logout() {
         runCatching { authorized(HttpMethod.Post, "/api/v1/auth/logout") }
         store.clearTokens()

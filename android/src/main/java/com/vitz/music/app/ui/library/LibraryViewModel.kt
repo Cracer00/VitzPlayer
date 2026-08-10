@@ -12,13 +12,27 @@ import com.vitz.music.api.PlaylistDto
 import com.vitz.music.api.SearchResponse
 import com.vitz.music.api.TrackDto
 import com.vitz.music.app.data.CatalogRepository
+import com.vitz.music.app.data.Downloads
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 enum class LibraryTab { ALL, LIKED }
 
-class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
+class LibraryViewModel(
+    private val catalog: CatalogRepository,
+    private val downloads: Downloads,
+) : ViewModel() {
+
+    /** Что уже лежит на устройстве: список перечитывается после каждой загрузки и удаления. */
+    var downloadedIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** Треки, которые качаются прямо сейчас, — чтобы показать это в строке. */
+    var downloading by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     val tracks = mutableStateListOf<TrackDto>()
     var playlists by mutableStateOf<List<PlaylistDto>>(emptyList())
@@ -45,9 +59,38 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
     private var filterJob: Job? = null
     private var endReached = false
 
+    /** Номер последнего запроса: ответ, который обогнали, не должен переписывать список. */
+    private var requestId = 0
+
     init {
         reload()
         loadPlaylists()
+        refreshDownloads()
+        observeMirror()
+    }
+
+    /**
+     * Подписка на изменения зеркала.
+     *
+     * Без неё список остаётся снимком, сделанным при открытии экрана: синхронизация приходит
+     * следом за первым чтением, и новые треки не появлялись бы до смены вкладки. Пауза перед
+     * перечитыванием — потому что синхронизация пишет постранично и дёргает счётчик на каждой
+     * странице; [collectLatest] отменяет ожидание, если пришла следующая.
+     */
+    private fun observeMirror() {
+        viewModelScope.launch {
+            catalog.catalogRevision.drop(1).collectLatest {
+                delay(SETTLE_MS)
+                refreshTracks()
+                loadPlaylists()
+            }
+        }
+        viewModelScope.launch {
+            catalog.downloadsRevision.drop(1).collectLatest {
+                delay(SETTLE_MS)
+                refreshDownloads()
+            }
+        }
     }
 
     fun switchTab(next: LibraryTab) {
@@ -57,25 +100,50 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
     }
 
     fun reload() {
-        tracks.clear()
         endReached = false
         error = null
-        loadMore()
+        load(offset = 0, limit = CatalogRepository.PAGE_SIZE, replace = true)
+    }
+
+    /**
+     * Перечитывание уже показанного куска на месте — на столько же строк, сколько загружено.
+     * Список не очищаем: обновление приезжает само, и выбрасывать человека в начало каталога
+     * из-за фоновой синхронизации нельзя.
+     */
+    private fun refreshTracks() {
+        endReached = false
+        load(offset = 0, limit = tracks.size.coerceAtLeast(CatalogRepository.PAGE_SIZE), replace = true)
     }
 
     /** Подгрузка следующей страницы. Вызывается, когда список докручен почти до конца. */
     fun loadMore() {
         if (loading || endReached) return
+        load(offset = tracks.size, limit = CatalogRepository.PAGE_SIZE, replace = false)
+    }
+
+    private fun load(offset: Int, limit: Int, replace: Boolean) {
+        val id = ++requestId
         loading = true
         viewModelScope.launch {
-            runCatching {
+            val result = runCatching {
                 val filter = libraryQuery.trim().takeIf { it.isNotEmpty() }
                 when (tab) {
-                    LibraryTab.ALL -> catalog.tracks(offset = tracks.size, query = filter)
-                    LibraryTab.LIKED -> catalog.likedTracks(offset = tracks.size, query = filter)
+                    LibraryTab.ALL -> catalog.tracks(offset = offset, limit = limit, query = filter)
+                    LibraryTab.LIKED -> catalog.likedTracks(offset = offset, limit = limit, query = filter)
                 }
-            }.onSuccess { page ->
-                tracks.addAll(page.items)
+            }
+            if (id != requestId) return@launch
+
+            result.onSuccess { page ->
+                if (replace) {
+                    tracks.clear()
+                    tracks.addAll(page.items)
+                } else {
+                    // Каталог мог пополниться между страницами, и окно по offset сдвинулось:
+                    // повтор уронил бы LazyColumn, у которого ключ — идентификатор трека.
+                    val known = tracks.mapTo(HashSet()) { it.id }
+                    tracks.addAll(page.items.filter { known.add(it.id) })
+                }
                 total = page.total
                 endReached = page.items.isEmpty() || tracks.size >= page.total
                 error = null
@@ -131,6 +199,28 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
         }
     }
 
+    fun refreshDownloads() {
+        viewModelScope.launch { downloadedIds = downloads.downloadedIds() }
+    }
+
+    /**
+     * Скачать или удалить с устройства. Повторное нажатие на скачанном треке удаляет файл:
+     * отдельная кнопка удаления в списке заняла бы место, а действие обратное и очевидное.
+     */
+    fun toggleDownload(track: TrackDto) {
+        if (track.id in downloading) return
+        viewModelScope.launch {
+            if (track.id in downloadedIds) {
+                downloads.remove(track.id)
+            } else {
+                downloading = downloading + track.id
+                downloads.download(track)
+                downloading = downloading - track.id
+            }
+            downloadedIds = downloads.downloadedIds()
+        }
+    }
+
     fun onQueryChange(next: String) {
         query = next
         searchJob?.cancel()
@@ -148,8 +238,11 @@ class LibraryViewModel(private val catalog: CatalogRepository) : ViewModel() {
     }
 
     companion object {
-        fun factory(catalog: CatalogRepository) = viewModelFactory {
-            initializer { LibraryViewModel(catalog) }
+        /** Сколько ждать после сигнала об изменении зеркала, прежде чем перечитывать. */
+        private const val SETTLE_MS = 400L
+
+        fun factory(catalog: CatalogRepository, downloads: Downloads) = viewModelFactory {
+            initializer { LibraryViewModel(catalog, downloads) }
         }
     }
 }

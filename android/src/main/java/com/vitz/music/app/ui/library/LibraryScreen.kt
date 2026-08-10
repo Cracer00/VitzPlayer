@@ -34,6 +34,7 @@ fun LibraryScreen(
     model: LibraryViewModel,
     onPlay: (TrackDto, List<TrackDto>) -> Unit,
     modifier: Modifier = Modifier,
+    playingTrackId: String? = null,
 ) {
     val listState = rememberLazyListState()
 
@@ -106,6 +107,10 @@ fun LibraryScreen(
                     track = track,
                     onClick = { onPlay(track, model.tracks.toList()) },
                     onToggleLike = { model.toggleLike(track) },
+                    downloaded = track.id in model.downloadedIds,
+                    downloading = track.id in model.downloading,
+                    playing = track.id == playingTrackId,
+                    onToggleDownload = { model.toggleDownload(track) },
                 )
             }
             if (model.loading) {
