@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MusicNote
@@ -41,6 +42,7 @@ fun TrackRow(
     modifier: Modifier = Modifier,
     downloaded: Boolean = false,
     downloading: Boolean = false,
+    downloadFailed: Boolean = false,
     playing: Boolean = false,
     onToggleDownload: (() -> Unit)? = null,
 ) {
@@ -94,6 +96,14 @@ fun TrackRow(
                         Icons.Filled.DownloadDone,
                         contentDescription = "Удалить с устройства",
                         tint = MaterialTheme.colorScheme.primary,
+                    )
+
+                    // Сорвавшаяся загрузка обязана отличаться от готовой на вид: галочка
+                    // там, где ничего не скачалось, обнаруживается уже в дороге.
+                    downloadFailed -> Icon(
+                        Icons.Filled.ErrorOutline,
+                        contentDescription = "Не скачалось, нажмите ещё раз",
+                        tint = MaterialTheme.colorScheme.error,
                     )
 
                     else -> Icon(

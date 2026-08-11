@@ -1,6 +1,7 @@
 package com.vitz.music.app.ui
 
 import android.content.Intent
+import android.media.AudioManager
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -105,11 +107,33 @@ fun HomeScreen(
             }
         }
 
-        Card {
-            Row(
-                Modifier.padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        StartupCard(settings)
+
+        UpdateCard(updates)
+
+        TextButton(onClick = onLogout) { Text("Выйти") }
+    }
+}
+
+/**
+ * Что происходит при запуске.
+ *
+ * Три настройки стоят вместе, потому что работают только вместе: помнить место, начинать
+ * играть само и на какой громкости. Порознь они читаются как случайные переключатели,
+ * а вместе описывают ровно то, что видит водитель, повернув ключ.
+ */
+@Composable
+private fun StartupCard(settings: AppSettings, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    // Шкала громкости у каждой магнитолы своя, и «10» без второго числа ничего не значит.
+    val maxVolume = remember {
+        val audio = context.getSystemService(AudioManager::class.java)
+        audio?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
+    }
+
+    Card(modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Продолжать с того же места", style = MaterialTheme.typography.bodyLarge)
                     Text(
@@ -123,11 +147,51 @@ fun HomeScreen(
                     onCheckedChange = settings::updateResumeOnStart,
                 )
             }
+
+            Row(
+                Modifier.padding(top = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Играть сразу при запуске", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Даже если в прошлый раз музыку поставили на паузу",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = settings.autoplayOnStart,
+                    onCheckedChange = settings::updateAutoplayOnStart,
+                    enabled = settings.resumeOnStart,
+                )
+            }
+
+            Row(
+                Modifier.padding(top = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Громкость при автостарте", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (settings.startVolume <= 0) "Не менять — как оставила магнитола"
+                        else "${settings.startVolume} из $maxVolume",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // Кнопки, а не ползунок: попасть пальцем в ползунок на ходу невозможно.
+                OutlinedButton(
+                    onClick = { settings.updateStartVolume(settings.startVolume - 1) },
+                    enabled = settings.startVolume > 0,
+                ) { Text("−") }
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = { settings.updateStartVolume(settings.startVolume + 1) },
+                    enabled = settings.startVolume < maxVolume,
+                ) { Text("+") }
+            }
         }
-
-        UpdateCard(updates)
-
-        TextButton(onClick = onLogout) { Text("Выйти") }
     }
 }
 

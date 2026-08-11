@@ -109,6 +109,7 @@ fun LibraryScreen(
                     onToggleLike = { model.toggleLike(track) },
                     downloaded = track.id in model.downloadedIds,
                     downloading = track.id in model.downloading,
+                    downloadFailed = track.id in model.failedDownloads,
                     playing = track.id == playingTrackId,
                     onToggleDownload = { model.toggleDownload(track) },
                 )

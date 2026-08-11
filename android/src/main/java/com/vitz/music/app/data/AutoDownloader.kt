@@ -1,8 +1,6 @@
 package com.vitz.music.app.data
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -33,6 +31,7 @@ class AutoDownloader(
     private val mirror: MirrorDb,
     private val downloads: Downloads,
     private val settings: AppSettings,
+    private val connectivity: Connectivity,
     private val scope: CoroutineScope,
 ) {
 
@@ -84,7 +83,13 @@ class AutoDownloader(
     private suspend fun run() {
         if (settings.autoDownload == AutoDownloadScope.OFF) return
 
-        if (settings.wifiOnly && !onWifi()) {
+        // Отсутствие интернета — самая частая причина, и назвать её надо первой: иначе
+        // автозагрузка выглядит сломанной там, где она просто ждёт связи.
+        if (!connectivity.online()) {
+            lastSkipReason = "Нет интернета — скачивание ждёт связи"
+            return
+        }
+        if (settings.wifiOnly && !connectivity.unmetered()) {
             lastSkipReason = "Ждёт Wi-Fi"
             return
         }
@@ -108,12 +113,13 @@ class AutoDownloader(
         remaining = wanted.size
         lastSkipReason = null
 
+        var failures = 0
         for (track in wanted) {
             // Именно своя отмена, а не жизнь общей области: appScope живёт сколько процесс,
             // и по нему остановка не читалась бы вовсе.
             if (!currentCoroutineContext().isActive) break
             // Условия могли измениться на середине: вышли из зоны Wi-Fi, кончилось место.
-            if (settings.wifiOnly && !onWifi()) {
+            if (settings.wifiOnly && !connectivity.unmetered()) {
                 lastSkipReason = "Ждёт Wi-Fi"
                 break
             }
@@ -122,25 +128,33 @@ class AutoDownloader(
                 break
             }
 
-            runCatching { downloads.download(track, settings.rendition) }
-                .onFailure { error ->
+            val result = runCatching { downloads.download(track, settings.rendition) }
+                .getOrElse { error ->
                     // Отмену пропускаем наружу: проглоченная, она превратила бы остановку
                     // в холостой пробег по всей оставшейся очереди.
                     if (error is CancellationException) throw error
                     Log.i(TAG, "Автозагрузка ${track.id} не удалась: ${error.message}")
+                    DownloadResult.Failed(error.message ?: "неизвестная ошибка")
                 }
+
+            if (result is DownloadResult.Failed) {
+                failures++
+                lastSkipReason = "Не скачивается: ${result.reason}"
+                // Пропала связь — дальше по очереди будет ровно то же самое, и триста
+                // одинаковых неудач подряд только съедят батарею.
+                if (result.offline) break
+                if (failures >= MAX_FAILURES) {
+                    lastSkipReason = "Скачивание остановлено: ${result.reason}"
+                    break
+                }
+            } else {
+                failures = 0
+            }
             remaining--
         }
 
         running = false
         remaining = 0
-    }
-
-    private fun onWifi(): Boolean {
-        val manager = context.getSystemService(ConnectivityManager::class.java) ?: return false
-        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
-        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }
 
     private fun freeBytes(): Long = runCatching { File(context.filesDir.toURI()).usableSpace }.getOrDefault(0L)
@@ -153,5 +167,8 @@ class AutoDownloader(
 
         /** За один заход берём не больше — остальное догонит следующая синхронизация. */
         const val MAX_BATCH = 500
+
+        /** Сколько неудач подряд считать общей поломкой, а не невезением одного трека. */
+        const val MAX_FAILURES = 5
     }
 }

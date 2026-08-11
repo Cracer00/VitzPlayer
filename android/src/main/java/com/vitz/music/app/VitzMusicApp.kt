@@ -10,7 +10,9 @@ import com.vitz.music.app.data.ApiClient
 import com.vitz.music.app.data.AppSettings
 import com.vitz.music.app.data.AutoDownloader
 import com.vitz.music.app.data.CatalogRepository
+import com.vitz.music.app.data.Connectivity
 import com.vitz.music.app.data.Downloads
+import com.vitz.music.app.data.MediaLinks
 import com.vitz.music.app.data.PlaybackStateStore
 import com.vitz.music.app.data.SyncService
 import com.vitz.music.app.data.TokenStore
@@ -28,7 +30,11 @@ class VitzMusicApp : Application(), SingletonImageLoader.Factory {
     val tokenStore: TokenStore by lazy { TokenStore(this) }
     val api: ApiClient by lazy { ApiClient(tokenStore) }
     val mirror: MirrorDb by lazy { MirrorDb(this) }
-    val downloads: Downloads by lazy { Downloads(this, api, mirror) }
+    val connectivity: Connectivity by lazy { Connectivity(this) }
+
+    /** Продление подписанных ссылок: и загрузкам, и проигрывателю нужны живые адреса. */
+    val mediaLinks: MediaLinks by lazy { MediaLinks(api, mirror) }
+    val downloads: Downloads by lazy { Downloads(this, api, mirror, mediaLinks, connectivity) }
     val catalog: CatalogRepository by lazy {
         CatalogRepository(api, mirror, downloads, onLiked = { autoDownloader.onTrackLiked() })
     }
@@ -43,7 +49,7 @@ class VitzMusicApp : Application(), SingletonImageLoader.Factory {
     val appScope: CoroutineScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
 
     val autoDownloader: AutoDownloader by lazy {
-        AutoDownloader(this, mirror, downloads, settings, appScope)
+        AutoDownloader(this, mirror, downloads, settings, connectivity, appScope)
     }
 
     /**

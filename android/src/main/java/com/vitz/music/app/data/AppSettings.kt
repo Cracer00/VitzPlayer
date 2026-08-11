@@ -2,6 +2,7 @@ package com.vitz.music.app.data
 
 import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
@@ -57,6 +58,25 @@ class AppSettings(context: Context) {
         private set
 
     /**
+     * Играть сразу после запуска, даже если музыку остановили руками.
+     *
+     * Магнитола просыпается вместе с зажиганием, и ждать от водителя ещё одного нажатия
+     * незачем — он уже повернул ключ. Настройка отдельная от [resumeOnStart] намеренно:
+     * «помнить место» и «начинать играть само» — разные обещания, и второе нужно не всем.
+     */
+    var autoplayOnStart by mutableStateOf(prefs.getBoolean(KEY_AUTOPLAY, true))
+        private set
+
+    /**
+     * Громкость мультимедиа, которую выставляем при автостарте. `0` — не трогать системную.
+     *
+     * Без неё автостарт — лотерея: магнитола просыпается с той громкостью, что осталась
+     * от радио или прошлой поездки, и музыка либо не слышна, либо бьёт по ушам.
+     */
+    var startVolume by mutableIntStateOf(prefs.getInt(KEY_START_VOLUME, DEFAULT_START_VOLUME))
+        private set
+
+    /**
      * Тема. По умолчанию тёмная, а не системная: приложением пользуются в машине, чаще
      * в темноте, и белый экран там бьёт по глазам независимо от того, что стоит в системе.
      */
@@ -78,6 +98,16 @@ class AppSettings(context: Context) {
         prefs.edit().putBoolean(KEY_RESUME, value).apply()
     }
 
+    fun updateAutoplayOnStart(value: Boolean) {
+        autoplayOnStart = value
+        prefs.edit().putBoolean(KEY_AUTOPLAY, value).apply()
+    }
+
+    fun updateStartVolume(value: Int) {
+        startVolume = value.coerceAtLeast(0)
+        prefs.edit().putInt(KEY_START_VOLUME, startVolume).apply()
+    }
+
     fun updateAutoDownload(scope: AutoDownloadScope) {
         autoDownload = scope
         prefs.edit().putString(KEY_SCOPE, scope.name).apply()
@@ -93,11 +123,16 @@ class AppSettings(context: Context) {
         prefs.edit().putBoolean(KEY_ORIGINAL, value).apply()
     }
 
-    private companion object {
-        const val KEY_SCOPE = "auto_download_scope"
-        const val KEY_WIFI_ONLY = "auto_download_wifi_only"
-        const val KEY_ORIGINAL = "download_original"
-        const val KEY_RESUME = "resume_on_start"
-        const val KEY_THEME = "theme_mode"
+    companion object {
+        /** Ступень громкости при автостарте: на шкале магнитолы это спокойная езда. */
+        const val DEFAULT_START_VOLUME = 10
+
+        private const val KEY_SCOPE = "auto_download_scope"
+        private const val KEY_WIFI_ONLY = "auto_download_wifi_only"
+        private const val KEY_ORIGINAL = "download_original"
+        private const val KEY_RESUME = "resume_on_start"
+        private const val KEY_AUTOPLAY = "autoplay_on_start"
+        private const val KEY_START_VOLUME = "start_volume"
+        private const val KEY_THEME = "theme_mode"
     }
 }

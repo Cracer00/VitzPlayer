@@ -100,7 +100,7 @@ fun MainScreen(
 ) {
     val nav = rememberNavController()
     val model: LibraryViewModel = viewModel(
-        factory = LibraryViewModel.factory(app.catalog, app.downloads),
+        factory = LibraryViewModel.factory(app.catalog, app.downloads, app.settings),
     )
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route

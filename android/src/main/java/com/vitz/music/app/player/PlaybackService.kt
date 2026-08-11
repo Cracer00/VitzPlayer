@@ -1,9 +1,15 @@
 package com.vitz.music.app.player
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.util.Log
 import android.view.KeyEvent
+import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import androidx.core.net.toUri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.HeartRating
@@ -11,7 +17,12 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.Rating
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
@@ -56,12 +67,17 @@ class PlaybackService : MediaSessionService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /** Играла ли музыка в момент, когда магнитола погасила экран. */
+    private var sleptWhilePlaying = false
+    private var screen: BroadcastReceiver? = null
+
     private val catalog by lazy { (application as VitzMusicApp).catalog }
 
     override fun onCreate() {
         super.onCreate()
 
         val player = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory()))
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -80,7 +96,68 @@ class PlaybackService : MediaSessionService() {
 
         player.addListener(PersistingListener(player))
         startPositionTicker(player)
+        watchScreen(player)
         restoreLastPlayback(player)
+    }
+
+    /**
+     * Сон и пробуждение магнитолы.
+     *
+     * Выключенное зажигание не всегда убивает процесс: часто голова просто гасит экран,
+     * и тогда «запуска» при следующей поездке не происходит вовсе — плеер уже запущен и
+     * стоит на паузе. Поэтому запоминаем, играла ли музыка, когда экран погас, и на
+     * пробуждении возвращаем её.
+     *
+     * Именно «играла, когда погас», а не просто пауза: паузу, поставленную руками при
+     * живом экране, гасание экрана оживлять не должно.
+     *
+     * Приёмник только динамический — `ACTION_SCREEN_ON` через манифест не приходит вовсе.
+     */
+    private fun watchScreen(player: ExoPlayer) {
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        ContextCompat.registerReceiver(this, screenReceiver(player), filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+    }
+
+    private fun screenReceiver(player: ExoPlayer) = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                // playWhenReady, а не isPlaying: голова успевает отобрать аудиофокус
+                // раньше, чем гасит экран, и «играет» к этому моменту уже false.
+                Intent.ACTION_SCREEN_OFF -> sleptWhilePlaying = player.playWhenReady || player.isPlaying
+
+                Intent.ACTION_SCREEN_ON -> {
+                    if (!sleptWhilePlaying || player.isPlaying) return
+                    sleptWhilePlaying = false
+                    if (!settings.resumeOnStart || !settings.autoplayOnStart) return
+                    if (player.mediaItemCount == 0) return
+                    Log.i(TAG, "Магнитола проснулась — продолжаю воспроизведение")
+                    applyStartVolume()
+                    player.play()
+                }
+            }
+        }
+    }.also { screen = it }
+
+    /**
+     * Откуда плеер берёт байты.
+     *
+     * Поверх обычного источника — [ResolvingDataSource]: ссылки на медиа подписаны и живут
+     * часы, а зеркало помнит те, что приехали с последней синхронизацией. Без продления
+     * перед самым открытием потока каталог, пролежавший ночь, отвечал бы `403` на каждый
+     * трек, кроме скачанных, — и плеер молча спотыкался бы на первой же песне.
+     */
+    private fun dataSourceFactory(): DataSource.Factory {
+        val http = DefaultHttpDataSource.Factory().setAllowCrossProtocolRedirects(true)
+        // DefaultDataSource, а не только http: скачанное играет с диска, по file://.
+        val base = DefaultDataSource.Factory(this, http)
+        return ResolvingDataSource.Factory(base) { spec ->
+            app.mediaLinks.freshUrlBlocking(spec.uri.toString())
+                ?.let { fresh -> spec.withUri(fresh.toUri()) }
+                ?: spec
+        }
     }
 
     /**
@@ -118,9 +195,11 @@ class PlaybackService : MediaSessionService() {
     /**
      * Восстановление очереди и позиции.
      *
-     * Играть само начинает только если в момент пропажи питания музыка играла. Пауза,
-     * поставленная руками, так и останется паузой: заводить двигатель и получать звук,
-     * который сам себя включил после того, как его выключили, — неожиданно.
+     * При включённом автостарте музыка продолжается сама, даже если в прошлый раз её
+     * поставили на паузу: магнитола просыпается вместе с зажиганием, и ждать от водителя
+     * ещё одного нажатия незачем — он уже повернул ключ. Кому такое не нужно, выключает
+     * автостарт на вкладке «Профиль», и тогда сама заиграет только музыка, которую
+     * оборвали на ходу.
      */
     private fun restoreLastPlayback(player: ExoPlayer) {
         val saved = playbackState.load() ?: return
@@ -135,9 +214,34 @@ class PlaybackService : MediaSessionService() {
                 if (player.mediaItemCount > 0) return@withContext
                 player.setMediaItems(items, saved.index.coerceIn(0, items.lastIndex), saved.positionMs)
                 player.prepare()
-                if (settings.resumeOnStart && saved.wasPlaying) player.play()
+
+                if (!settings.resumeOnStart) return@withContext
+                if (!saved.wasPlaying && !settings.autoplayOnStart) return@withContext
+                applyStartVolume()
+                player.play()
             }
         }
+    }
+
+    /**
+     * Громкость мультимедиа для автостарта.
+     *
+     * Магнитола просыпается с той громкостью, что осталась от радио или прошлой поездки,
+     * поэтому музыка, включившаяся сама, звучит то шёпотом, то на весь двор. Ставим свою
+     * ступень — и только в момент автостарта: крутить громкость под руками у водителя,
+     * пока он уже слушает, нельзя.
+     *
+     * Система может и отказать — например, при включённом «не беспокоить». Тогда играем
+     * на той громкости, что есть: молчать из-за этого было бы хуже.
+     */
+    private fun applyStartVolume() {
+        val wanted = settings.startVolume
+        if (wanted <= 0) return
+        val audio = getSystemService(AudioManager::class.java) ?: return
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max <= 0) return
+        runCatching { audio.setStreamVolume(AudioManager.STREAM_MUSIC, wanted.coerceIn(1, max), 0) }
+            .onFailure { Log.w(TAG, "Не выставил громкость автостарта: ${it.message}") }
     }
 
     private inner class PersistingListener(private val player: ExoPlayer) : Player.Listener {
@@ -161,6 +265,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        screen?.let { runCatching { unregisterReceiver(it) } }
+        screen = null
         session?.run {
             player.release()
             release()

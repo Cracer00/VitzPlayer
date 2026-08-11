@@ -60,6 +60,16 @@ fun DownloadsScreen(
     var rows by remember { mutableStateOf<List<DownloadRow>>(emptyList()) }
     var tracks by remember { mutableStateOf<List<TrackDto>>(emptyList()) }
     var confirmClearAll by remember { mutableStateOf(false) }
+    var online by remember { mutableStateOf(true) }
+
+    // Связь спрашиваем повторно, а не один раз при открытии: экран висит перед глазами,
+    // пока машина выезжает из гаража, и «нет интернета» должно гаснуть само.
+    LaunchedEffect(Unit) {
+        while (true) {
+            online = app.connectivity.online()
+            delay(5_000)
+        }
+    }
 
     suspend fun refresh() {
         // Файлы могли пропасть мимо приложения — сверяем список с диском, иначе он обещал бы
@@ -110,6 +120,7 @@ fun DownloadsScreen(
             SummaryCard(
                 app = app,
                 rows = rows,
+                online = online,
                 onClearAll = { confirmClearAll = true },
             )
         }
@@ -172,6 +183,7 @@ fun DownloadsScreen(
 private fun SummaryCard(
     app: VitzMusicApp,
     rows: List<DownloadRow>,
+    online: Boolean,
     onClearAll: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -189,6 +201,33 @@ private fun SummaryCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 6.dp),
             )
+
+            // Нет сети — говорим об этом здесь, а не оставляем догадываться по кнопке,
+            // которая ничего не делает.
+            if (!online) {
+                Text(
+                    "Нет интернета — скачать сейчас нечего. Уже скачанное играет как обычно.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+            }
+
+            app.downloads.lastError?.let { error ->
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { app.downloads.clearLastError() }) { Text("Скрыть") }
+                }
+            }
+
             app.autoDownloader.let { downloader ->
                 when {
                     downloader.running -> {

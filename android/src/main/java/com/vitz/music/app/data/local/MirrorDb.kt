@@ -160,6 +160,22 @@ class MirrorDb(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
     }
 
     /**
+     * Продлённые ссылки на файлы одного трека.
+     *
+     * Счётчик каталога здесь намеренно не двигается: подпись — не изменение каталога, и
+     * список треков не должен перечитываться целиком оттого, что кто-то продлил ссылку
+     * перед скачиванием одной строки.
+     */
+    fun updateMedia(trackId: String, media: List<MediaLink>) {
+        writableDatabase.update(
+            "tracks",
+            ContentValues().apply { put("media_json", json.encodeToString(media)) },
+            "id = ?",
+            arrayOf(trackId),
+        )
+    }
+
+    /**
      * Трек исчез с сервера. Вместе со строкой каталога уходит и запись о загрузке: иначе
      * скачанный файл остался бы лежать в памяти магнитолы, на который уже ничто не ссылается.
      *

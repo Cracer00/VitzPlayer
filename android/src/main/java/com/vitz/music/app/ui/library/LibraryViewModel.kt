@@ -11,7 +11,9 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.vitz.music.api.PlaylistDto
 import com.vitz.music.api.SearchResponse
 import com.vitz.music.api.TrackDto
+import com.vitz.music.app.data.AppSettings
 import com.vitz.music.app.data.CatalogRepository
+import com.vitz.music.app.data.DownloadResult
 import com.vitz.music.app.data.Downloads
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -24,6 +26,7 @@ enum class LibraryTab { ALL, LIKED }
 class LibraryViewModel(
     private val catalog: CatalogRepository,
     private val downloads: Downloads,
+    private val settings: AppSettings,
 ) : ViewModel() {
 
     /** Что уже лежит на устройстве: список перечитывается после каждой загрузки и удаления. */
@@ -32,6 +35,10 @@ class LibraryViewModel(
 
     /** Треки, которые качаются прямо сейчас, — чтобы показать это в строке. */
     var downloading by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** Треки, загрузка которых сорвалась. Строка показывает это значком, а не тишиной. */
+    var failedDownloads by mutableStateOf<Set<String>>(emptySet())
         private set
 
     val tracks = mutableStateListOf<TrackDto>()
@@ -206,16 +213,28 @@ class LibraryViewModel(
     /**
      * Скачать или удалить с устройства. Повторное нажатие на скачанном треке удаляет файл:
      * отдельная кнопка удаления в списке заняла бы место, а действие обратное и очевидное.
+     *
+     * Неудача обязана быть видна и в строке, и словами наверху экрана: галочка вместо
+     * скачанного трека — худшее, что здесь может произойти, потому что обнаруживается она
+     * уже в дороге, когда играть нечем.
      */
     fun toggleDownload(track: TrackDto) {
         if (track.id in downloading) return
         viewModelScope.launch {
             if (track.id in downloadedIds) {
                 downloads.remove(track.id)
+                failedDownloads = failedDownloads - track.id
             } else {
                 downloading = downloading + track.id
-                downloads.download(track)
+                failedDownloads = failedDownloads - track.id
+                val result = downloads.download(track, settings.rendition)
                 downloading = downloading - track.id
+                if (result is DownloadResult.Failed) {
+                    failedDownloads = failedDownloads + track.id
+                    error = "«${track.title}» не скачался: ${result.reason}"
+                } else {
+                    error = null
+                }
             }
             downloadedIds = downloads.downloadedIds()
         }
@@ -241,8 +260,8 @@ class LibraryViewModel(
         /** Сколько ждать после сигнала об изменении зеркала, прежде чем перечитывать. */
         private const val SETTLE_MS = 400L
 
-        fun factory(catalog: CatalogRepository, downloads: Downloads) = viewModelFactory {
-            initializer { LibraryViewModel(catalog, downloads) }
+        fun factory(catalog: CatalogRepository, downloads: Downloads, settings: AppSettings) = viewModelFactory {
+            initializer { LibraryViewModel(catalog, downloads, settings) }
         }
     }
 }
