@@ -58,6 +58,18 @@ class PlayerController(
     var hasPrevious by mutableStateOf(false)
         private set
 
+    /**
+     * Трек, который приехал из прошлой поездки, а не из нажатия по списку.
+     *
+     * Ставится один раз: очередь, найденная в сессии до того, как в этом запуске что-то
+     * включили руками, — восстановленная. По ней экран понимает, что показывать.
+     */
+    var restoredTrackId by mutableStateOf<String?>(null)
+        private set
+
+    /** В этом запуске музыку выбирали руками — тогда очередь в сессии уже не «прошлая». */
+    private var chosenByHand = false
+
     val isConnected: Boolean get() = controller != null
 
     /** Запрос, пришедший до того, как подключение к сессии состоялось. */
@@ -109,6 +121,8 @@ class PlayerController(
             liked = (item?.mediaMetadata?.userRating as? HeartRating)?.isHeart == true
         }
 
+        if (restoredTrackId == null && !chosenByHand && item != null) restoredTrackId = item.mediaId
+
         currentTrackId = item?.mediaId
         title = item?.mediaMetadata?.title?.toString()
         artist = item?.mediaMetadata?.artist?.toString()
@@ -123,6 +137,7 @@ class PlayerController(
     // --- команды ---
 
     fun play(track: TrackDto, queue: List<TrackDto>) {
+        chosenByHand = true
         val controller = controller
         if (controller == null) {
             pending = track to queue
@@ -197,6 +212,35 @@ fun TrackDto.toMediaItem(localPath: String? = null): MediaItem? {
                 // Отметка «нравится» едет в метаданных: по ней приборка рисует сердечко,
                 // не обращаясь к серверу самостоятельно.
                 .setUserRating(androidx.media3.common.HeartRating(liked))
+                .setIsBrowsable(false)
+                .setIsPlayable(true)
+                .build(),
+        )
+        .build()
+}
+
+/**
+ * То же самое из снимка прошлой поездки.
+ *
+ * Снимок делается ровно для случая, когда зеркало трек не отдало, поэтому здесь нет
+ * ни выбора рендиции, ни запасных вариантов: играем по адресу, который в прошлый раз
+ * работал. Скачанный файл всё равно в приоритете — он не зависит ни от сети, ни от подписи.
+ */
+@UnstableApi
+fun com.vitz.music.app.data.SavedTrack.toMediaItem(localPath: String? = null): MediaItem? {
+    val uri = localPath?.let { android.net.Uri.fromFile(java.io.File(it)).toString() }
+        ?: url
+        ?: return null
+    return MediaItem.Builder()
+        .setMediaId(id)
+        .setUri(uri)
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(title)
+                .setArtist(artist)
+                .setAlbumTitle(album)
+                .setArtworkUri(coverUrl?.let { android.net.Uri.parse(it) })
+                .setUserRating(HeartRating(liked))
                 .setIsBrowsable(false)
                 .setIsPlayable(true)
                 .build(),

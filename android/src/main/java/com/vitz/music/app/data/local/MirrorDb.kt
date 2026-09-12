@@ -308,14 +308,22 @@ class MirrorDb(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
         return Criteria(where.toString(), args)
     }
 
-    /** Треки по списку идентификаторов, в том же порядке: так восстанавливается очередь. */
+    /**
+     * Треки по списку идентификаторов, в том же порядке: так восстанавливается очередь.
+     *
+     * Читаем частями: в SQLite не больше 999 подстановок на запрос, а очередь — это весь
+     * список, из которого включили трек, и после нескольких страниц прокрутки он этот
+     * предел перешагивает. Целиком такой запрос падал бы, и восстанавливать было бы нечего.
+     */
     fun tracksByIds(ids: List<String>): List<TrackDto> {
         if (ids.isEmpty()) return emptyList()
-        val placeholders = ids.joinToString(",") { "?" }
-        val byId = readableDatabase.rawQuery(
-            "select * from tracks where id in ($placeholders)",
-            ids.toTypedArray(),
-        ).use { cursor -> cursor.mapAll { it.toTrack() } }.associateBy { it.id }
+        val byId = ids.distinct().chunked(SQL_VARIABLES_LIMIT).flatMap { chunk ->
+            val placeholders = chunk.joinToString(",") { "?" }
+            readableDatabase.rawQuery(
+                "select * from tracks where id in ($placeholders)",
+                chunk.toTypedArray(),
+            ).use { cursor -> cursor.mapAll { it.toTrack() } }
+        }.associateBy { it.id }
         return ids.mapNotNull { byId[it] }
     }
 
@@ -472,6 +480,9 @@ class MirrorDb(context: Context) : SQLiteOpenHelper(context, NAME, null, VERSION
         const val NAME = "vitz-music-mirror.db"
         const val VERSION = 1
         const val KEY_CURSOR = "sync_cursor"
+
+        /** Предел подстановок в одном запросе SQLite — с запасом от штатных 999. */
+        const val SQL_VARIABLES_LIMIT = 900
     }
 }
 

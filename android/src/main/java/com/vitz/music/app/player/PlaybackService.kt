@@ -1,5 +1,9 @@
 package com.vitz.music.app.player
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -7,6 +11,8 @@ import android.content.IntentFilter
 import android.media.AudioManager
 import android.util.Log
 import android.view.KeyEvent
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.core.net.toUri
@@ -29,14 +35,19 @@ import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
+import com.vitz.music.api.TrackDto
+import com.vitz.music.app.MainActivity
+import com.vitz.music.app.R
 import com.vitz.music.app.VitzMusicApp
 import com.vitz.music.app.data.AppSettings
 import com.vitz.music.app.data.Downloads
 import com.vitz.music.app.data.PlaybackStateStore
 import com.vitz.music.app.data.SavedPlayback
+import com.vitz.music.app.data.SavedTrack
 import com.vitz.music.app.data.local.MirrorDb
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -67,9 +78,35 @@ class PlaybackService : MediaSessionService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Играла ли музыка в момент, когда магнитола погасила экран. */
-    private var sleptWhilePlaying = false
+    /** Когда магнитола погасила экран. `0` — при нас не гасила. */
+    private var screenOffAtMs = 0L
+
+    /**
+     * Музыку остановил человек, а не голова и не конец очереди.
+     *
+     * Отличать обязательно: паузу, поставленную руками, пробуждение оживлять не должно,
+     * а тишину от отобранного аудиофокуса — обязано. По состоянию плеера их не различить,
+     * обе выглядят как `playWhenReady = false`.
+     */
+    private var pausedByHand = false
+
     private var screen: BroadcastReceiver? = null
+
+    /**
+     * Идёт восстановление очереди. Пока идёт, сохранять нечего: свои же `setMediaItems`
+     * приезжают в слушатель раньше, чем музыка успевает заиграть, и переписали бы
+     * «играло» на «стояло» — ровно то состояние, которое мы восстанавливаем.
+     */
+    private var restoring = false
+
+    /** За плеер взялись руками. После этого автостарт себя не навязывает. */
+    private var handsOn = false
+
+    /** Догон автостарта: попытки дождаться, когда голова отдаст звук. */
+    private var startRetry: Job? = null
+
+    /** Удержание переднего плана после включения магнитолы, пока музыка не пошла. */
+    private var bootHold: Job? = null
 
     private val catalog by lazy { (application as VitzMusicApp).catalog }
 
@@ -94,10 +131,23 @@ class PlaybackService : MediaSessionService() {
             .setCallback(RestrictedCallback())
             .build()
 
-        player.addListener(PersistingListener(player))
+        player.addListener(PersistingListener())
         startPositionTicker(player)
         watchScreen(player)
         restoreLastPlayback(player)
+    }
+
+    /**
+     * Службу подняли снаружи — приёмником включения магнитолы или после обновления.
+     *
+     * Такой запуск идёт через `startForegroundService`, и система ждёт, что служба
+     * объявится передним планом за считаные секунды. Media3 сделает это сама, но только
+     * когда музыка заиграет, а до того успевает пройти и чтение зеркала, и торг за
+     * аудиофокус с головой. Поэтому передний план держим своим уведомлением.
+     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RESUME_AFTER_BOOT) holdForegroundUntilPlaying()
+        return super.onStartCommand(intent, flags, startId)
     }
 
     /**
@@ -105,41 +155,73 @@ class PlaybackService : MediaSessionService() {
      *
      * Выключенное зажигание не всегда убивает процесс: часто голова просто гасит экран,
      * и тогда «запуска» при следующей поездке не происходит вовсе — плеер уже запущен и
-     * стоит на паузе. Поэтому запоминаем, играла ли музыка, когда экран погас, и на
-     * пробуждении возвращаем её.
+     * стоит на паузе. Поэтому пробуждение — такой же повод вернуть музыку, как и запуск.
      *
-     * Именно «играла, когда погас», а не просто пауза: паузу, поставленную руками при
-     * живом экране, гасание экрана оживлять не должно.
+     * Сигналов слушаем несколько: `ACTION_SCREEN_ON` приходит не на всякой прошивке, а
+     * зажигание отзывается то разблокировкой, то появлением питания. Лишний сигнал ничего
+     * не стоит — обработчик всё равно проверяет, что музыка не играет.
      *
-     * Приёмник только динамический — `ACTION_SCREEN_ON` через манифест не приходит вовсе.
+     * Приёмник только динамический: через манифест эти события не приходят вовсе.
      */
     private fun watchScreen(player: ExoPlayer) {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(Intent.ACTION_POWER_CONNECTED)
         }
         ContextCompat.registerReceiver(this, screenReceiver(player), filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     private fun screenReceiver(player: ExoPlayer) = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
-                // playWhenReady, а не isPlaying: голова успевает отобрать аудиофокус
-                // раньше, чем гасит экран, и «играет» к этому моменту уже false.
-                Intent.ACTION_SCREEN_OFF -> sleptWhilePlaying = player.playWhenReady || player.isPlaying
+            when (val action = intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> screenOffAtMs = System.currentTimeMillis()
 
-                Intent.ACTION_SCREEN_ON -> {
-                    if (!sleptWhilePlaying || player.isPlaying) return
-                    sleptWhilePlaying = false
-                    if (!settings.resumeOnStart || !settings.autoplayOnStart) return
-                    if (player.mediaItemCount == 0) return
-                    Log.i(TAG, "Магнитола проснулась — продолжаю воспроизведение")
-                    applyStartVolume()
-                    player.play()
-                }
+                Intent.ACTION_SCREEN_ON,
+                Intent.ACTION_USER_PRESENT,
+                Intent.ACTION_POWER_CONNECTED,
+                -> onWakeUp(player, action)
             }
         }
     }.also { screen = it }
+
+    /**
+     * Магнитола проснулась.
+     *
+     * Возвращаем музыку, если её не останавливали руками. Ручную паузу переживает только
+     * долгий сон: между «поставил на паузу и отвернулся» и «поставил на паузу, выключил
+     * зажигание и вернулся назавтра» разница ровно во времени, и во втором случае от плеера
+     * ждут того же, что и от радио, — что он заиграет сам.
+     *
+     * Пустая очередь здесь означает, что при запуске восстановить не удалось: зеркало было
+     * не готово или треков в нём не нашлось. Пробуем ещё раз — другого повода не будет.
+     */
+    private fun onWakeUp(player: ExoPlayer, from: String) {
+        if (player.isPlaying || player.playWhenReady) return
+        if (!settings.resumeOnStart || !settings.autoplayOnStart) return
+
+        val slept = if (screenOffAtMs == 0L) Long.MAX_VALUE else System.currentTimeMillis() - screenOffAtMs
+        if (pausedByHand && slept < LONG_SLEEP_MS) {
+            Log.i(TAG, "Пробуждение ($from): музыку только что остановили руками — не лезу")
+            return
+        }
+        screenOffAtMs = 0L
+
+        if (player.mediaItemCount == 0) {
+            Log.i(TAG, "Пробуждение ($from): очереди нет, собираю прошлую поездку заново")
+            restoreLastPlayback(player)
+            return
+        }
+        // Очередь доиграна до конца: «продолжить» тут означало бы начать её заново,
+        // а этого никто не просил.
+        if (player.playbackState == Player.STATE_ENDED) return
+
+        Log.i(TAG, "Пробуждение ($from) — продолжаю воспроизведение")
+        pausedByHand = false
+        applyStartVolume()
+        startPlayback(player)
+    }
 
     /**
      * Откуда плеер берёт байты.
@@ -166,30 +248,65 @@ class PlaybackService : MediaSessionService() {
      * Сохранять «на выходе» бессмысленно: зажигание выключается без предупреждения, процесс
      * убивают, и никакого прощального колбэка не будет. Раз в пять секунд — компромисс между
      * износом хранилища и тем, сколько секунд трека потеряется.
+     *
+     * Тикает и на паузе: очередь, набранную и не запущенную, помнить надо не меньше.
+     * Повторные записи одного и того же отсекает само хранилище.
      */
     private fun startPositionTicker(player: ExoPlayer) {
         serviceScope.launch {
             while (isActive) {
                 delay(SAVE_INTERVAL_MS)
-                withContext(Dispatchers.Main) {
-                    if (player.isPlaying) persist(player, playing = true)
-                }
+                val state = withContext(Dispatchers.Main) { snapshot(player) }
+                state?.let { playbackState.save(it) }
             }
         }
     }
 
-    private fun persist(player: Player, playing: Boolean) {
+    /** Что сейчас в плеере — в том виде, в каком это переживёт обрыв питания. */
+    private fun snapshot(player: Player): SavedPlayback? {
+        if (restoring) return null
         val ids = (0 until player.mediaItemCount).map { player.getMediaItemAt(it).mediaId }
-        if (ids.isEmpty()) return
-        playbackState.save(
-            SavedPlayback(
-                trackIds = ids,
-                index = player.currentMediaItemIndex,
-                positionMs = player.currentPosition.coerceAtLeast(0L),
-                wasPlaying = playing,
-                savedAtEpochMs = System.currentTimeMillis(),
-            ),
+        if (ids.isEmpty()) return null
+        val item = player.currentMediaItem
+        return SavedPlayback(
+            trackIds = ids,
+            index = player.currentMediaItemIndex,
+            currentTrackId = item?.mediaId,
+            positionMs = player.currentPosition.coerceAtLeast(0L),
+            // Сохраняем намерение (`playWhenReady`), а не факт (`isPlaying`): между треками
+            // и на буферизации музыка «не играет», хотя её никто не останавливал.
+            wasPlaying = player.playWhenReady,
+            savedAtEpochMs = System.currentTimeMillis(),
+            current = item?.let { snapshotOf(it) },
         )
+    }
+
+    /**
+     * Снимок текущего трека целиком, а не одним идентификатором.
+     *
+     * По идентификатору трек ищется в зеркале, а зеркало может его не отдать: база
+     * пересоздалась, синхронизация не дошла, трек уехал из каталога. Снимок делает
+     * возвращение к прошлому треку независимым от всего этого.
+     */
+    private fun snapshotOf(item: MediaItem) = SavedTrack(
+        id = item.mediaId,
+        title = item.mediaMetadata.title?.toString().orEmpty(),
+        artist = item.mediaMetadata.artist?.toString().orEmpty(),
+        album = item.mediaMetadata.albumTitle?.toString(),
+        coverUrl = item.mediaMetadata.artworkUri?.toString(),
+        url = item.localConfiguration?.uri?.toString(),
+        liked = (item.mediaMetadata.userRating as? HeartRating)?.isHeart == true,
+    )
+
+    /** Сохранить, не задерживая главный поток: запись идёт на диск и синхронно. */
+    private fun persist(player: Player) {
+        val state = snapshot(player) ?: return
+        serviceScope.launch { playbackState.save(state) }
+    }
+
+    /** То же, но немедленно: на прощании службы ждать своей очереди уже некому. */
+    private fun persistNow(player: Player) {
+        snapshot(player)?.let { runCatching { playbackState.save(it) } }
     }
 
     /**
@@ -202,24 +319,144 @@ class PlaybackService : MediaSessionService() {
      * оборвали на ходу.
      */
     private fun restoreLastPlayback(player: ExoPlayer) {
-        val saved = playbackState.load() ?: return
+        if (restoring) return
+        val saved = playbackState.load()
+        if (saved == null) {
+            Log.i(TAG, "Восстанавливать нечего: сохранённой очереди нет")
+            return
+        }
+        restoring = true
         serviceScope.launch {
-            val tracks = mirror.tracksByIds(saved.trackIds)
-            if (tracks.isEmpty()) return@launch
-            val items = tracks.mapNotNull { it.toMediaItem(downloads.localPath(it.id)) }
-            if (items.isEmpty()) return@launch
+            val fromMirror = runCatching { mirror.tracksByIds(saved.trackIds) }
+                .onFailure { Log.w(TAG, "Очередь прошлой поездки не прочиталась", it) }
+                .getOrDefault(emptyList())
+                .associateBy { it.id }
+            val items = buildQueue(saved, fromMirror)
 
             withContext(Dispatchers.Main) {
-                // Пока восстанавливались, пользователь мог уже включить что-то сам.
-                if (player.mediaItemCount > 0) return@withContext
-                player.setMediaItems(items, saved.index.coerceIn(0, items.lastIndex), saved.positionMs)
-                player.prepare()
+                try {
+                    if (items.isEmpty()) {
+                        // Молчание здесь ни от чего не отличимо, а причина ровно одна:
+                        // зеркало не знает этих треков и снимка тоже не осталось.
+                        Log.w(
+                            TAG,
+                            "Очередь не собралась: сохранено ${saved.trackIds.size}, " +
+                                "в зеркале ${fromMirror.size}, играбельных 0",
+                        )
+                        return@withContext
+                    }
+                    // Пока читали зеркало, пользователь мог уже включить что-то сам.
+                    if (player.mediaItemCount > 0) return@withContext
 
-                if (!settings.resumeOnStart) return@withContext
-                if (!saved.wasPlaying && !settings.autoplayOnStart) return@withContext
-                applyStartVolume()
-                player.play()
+                    val at = startIndexOf(saved, items)
+                    if (at < 0) Log.w(TAG, "Трек ${wantedIdOf(saved)} не собрался — начинаю очередь сначала")
+                    player.setMediaItems(
+                        items,
+                        at.coerceAtLeast(0),
+                        // Чужой трек с чужой секунды хуже, чем начало: если тот самый не
+                        // нашёлся, сохранённое время ничего не значит.
+                        if (at >= 0) saved.positionMs else 0L,
+                    )
+                    player.prepare()
+                    Log.i(
+                        TAG,
+                        "Очередь восстановлена: ${items.size} из ${saved.trackIds.size}, " +
+                            "трек ${wantedIdOf(saved)} на позиции $at",
+                    )
+
+                    if (!settings.resumeOnStart) {
+                        Log.i(TAG, "Автостарт выключен настройкой")
+                        return@withContext
+                    }
+                    if (!saved.wasPlaying && !settings.autoplayOnStart) {
+                        Log.i(TAG, "В прошлый раз стояла пауза, автостарт после паузы выключен")
+                        return@withContext
+                    }
+                    Log.i(TAG, "Продолжаю прошлую поездку с ${saved.positionMs} мс")
+                    applyStartVolume()
+                    startPlayback(player)
+                } finally {
+                    // Флаг снимается на любом исходе: оставленный поднятым, он выключил бы
+                    // сохранение позиции насовсем, и следующая поездка началась бы
+                    // с позапрошлого места.
+                    restoring = false
+                }
             }
+        }
+    }
+
+    /**
+     * Очередь из сохранённого состояния.
+     *
+     * Идём по сохранённому порядку, а не по тому, что вернуло зеркало: трек, которого там
+     * не оказалось, подменяем снимком, а не выбрасываем молча. Ради этого снимок и пишется —
+     * чтобы «вернуться к тому, что играло» не зависело от состояния базы.
+     */
+    private fun buildQueue(
+        saved: SavedPlayback,
+        fromMirror: Map<String, TrackDto>,
+    ): List<MediaItem> = saved.trackIds.mapNotNull { id ->
+        fromMirror[id]?.toMediaItem(downloads.localPath(id))
+            ?: saved.current?.takeIf { it.id == id }?.toMediaItem(downloads.localPath(id))
+    }
+
+    private fun wantedIdOf(saved: SavedPlayback): String? =
+        saved.currentTrackId ?: saved.trackIds.getOrNull(saved.index)
+
+    /**
+     * Где в собранной очереди тот самый трек. `-1`, если его в ней нет.
+     *
+     * Считаем по идентификатору, а не по сохранённому индексу: стоит выпасть одному треку
+     * до текущего — и индекс показывает на соседнюю песню. Ровно из-за этого плеер и
+     * «возвращался» не туда, куда обещал.
+     */
+    private fun startIndexOf(saved: SavedPlayback, items: List<MediaItem>): Int {
+        val wanted = wantedIdOf(saved) ?: return -1
+        return items.indexOfFirst { it.mediaId == wanted }
+    }
+
+    /**
+     * Пуск с догоном.
+     *
+     * Одного `play()` мало: магнитола просыпается со своим источником — радио, навигацией,
+     * приветствием, — и первый запрос аудиофокуса ей проигрывает. ExoPlayer в ответ сам
+     * снимает `playWhenReady`, и музыка молча не начинается: ни ошибки, ни уведомления,
+     * просто тишина, за которой снаружи не видно ничего.
+     *
+     * Поэтому повторяем попытку, пока голова не отдаст звук. Минута с лишним — не запас
+     * ради запаса: столько у головы занимает собственная загрузка с приветствием, и
+     * прежние двадцать секунд кончались ровно посреди неё.
+     *
+     * Прекращаем, как только заиграло или как только за плеер взялись руками: пауза
+     * водителя важнее нашего намерения.
+     */
+    private fun startPlayback(player: ExoPlayer) {
+        handsOn = false
+        player.play()
+
+        startRetry?.cancel()
+        startRetry = serviceScope.launch {
+            repeat(START_ATTEMPTS) { attempt ->
+                delay(START_RETRY_MS)
+                val done = withContext(Dispatchers.Main) {
+                    when {
+                        player.isPlaying -> true
+                        handsOn -> true
+                        else -> {
+                            Log.i(
+                                TAG,
+                                "Автостарт не взлетел (попытка ${attempt + 1}): " +
+                                    "playWhenReady=${player.playWhenReady}, состояние=${player.playbackState}",
+                            )
+                            if (player.playbackState == Player.STATE_IDLE) player.prepare()
+                            player.play()
+                            false
+                        }
+                    }
+                }
+                if (done) return@launch
+            }
+            Log.w(TAG, "Автостарт так и не начался — звук, похоже, занят другим источником")
         }
     }
 
@@ -244,11 +481,87 @@ class PlaybackService : MediaSessionService() {
             .onFailure { Log.w(TAG, "Не выставил громкость автостарта: ${it.message}") }
     }
 
-    private inner class PersistingListener(private val player: ExoPlayer) : Player.Listener {
-        override fun onIsPlayingChanged(isPlaying: Boolean) = persist(player, isPlaying)
+    /**
+     * Передний план на время торга за звук.
+     *
+     * Своё уведомление — расписка системе в том, что служба, поднятая через
+     * `startForegroundService`, уже на переднем плане. Настоящее, с обложкой и кнопками,
+     * поставит Media3, когда музыка заиграет; наше к тому моменту снимаем.
+     *
+     * Если музыка так и не пошла — сворачиваемся: висеть в шторке молча служба не должна.
+     */
+    private fun holdForegroundUntilPlaying() {
+        runCatching { startForeground(BOOT_NOTIFICATION_ID, bootNotification()) }
+            .onFailure { Log.w(TAG, "Не удержал передний план после включения: ${it.message}") }
 
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) =
-            persist(player, player.isPlaying)
+        bootHold?.cancel()
+        bootHold = serviceScope.launch {
+            repeat(BOOT_HOLD_ATTEMPTS) {
+                delay(BOOT_HOLD_STEP_MS)
+                val playing = withContext(Dispatchers.Main) { session?.player?.isPlaying == true }
+                if (playing) {
+                    // Media3 уже поставила своё уведомление и стала передним планом сама,
+                    // поэтому наше снимаем как обычное — её не трогая.
+                    getSystemService(NotificationManager::class.java)?.cancel(BOOT_NOTIFICATION_ID)
+                    return@launch
+                }
+            }
+            withContext(Dispatchers.Main) {
+                // Успело заиграть на последнем шаге — снимать передний план нельзя:
+                // он теперь принадлежит Media3, и снятие убрало бы уведомление плеера.
+                if (session?.player?.isPlaying == true) {
+                    getSystemService(NotificationManager::class.java)?.cancel(BOOT_NOTIFICATION_ID)
+                    return@withContext
+                }
+                Log.w(TAG, "После включения магнитолы музыка не пошла — сворачиваюсь")
+                ServiceCompat.stopForeground(this@PlaybackService, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    private fun bootNotification(): Notification {
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+            NotificationChannel(BOOT_CHANNEL_ID, "Возобновление", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Пока плеер возвращает музыку прошлой поездки"
+                setShowBadge(false)
+            },
+        )
+        val open = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        return NotificationCompat.Builder(this, BOOT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText("Возвращаю музыку прошлой поездки")
+            .setContentIntent(open)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .build()
+    }
+
+    /**
+     * Сохраняем на всём, что меняет «что играет» и «откуда».
+     *
+     * Прежде сохранение висело на паре событий, и мимо проходили целые повороты: перемотка,
+     * набранная и не запущенная очередь, снятое головой намерение играть. Каждый такой
+     * пропуск — это следующая поездка, начатая не с того места или не с того трека.
+     */
+    private inner class PersistingListener : Player.Listener {
+        override fun onEvents(player: Player, events: Player.Events) {
+            val meaningful = events.containsAny(
+                Player.EVENT_IS_PLAYING_CHANGED,
+                Player.EVENT_PLAY_WHEN_READY_CHANGED,
+                Player.EVENT_MEDIA_ITEM_TRANSITION,
+                Player.EVENT_TIMELINE_CHANGED,
+                Player.EVENT_POSITION_DISCONTINUITY,
+                Player.EVENT_PLAYBACK_STATE_CHANGED,
+            )
+            if (meaningful) persist(player)
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
@@ -260,11 +573,15 @@ class PlaybackService : MediaSessionService() {
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = session?.player
         if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
+            player?.let { persistNow(it) }
             stopSelf()
         }
     }
 
     override fun onDestroy() {
+        // Последнее слово: службу могли снять и на ходу, а несохранённые секунды — это
+        // ровно то место, к которому плеер обещал вернуться.
+        session?.player?.let { persistNow(it) }
         screen?.let { runCatching { unregisterReceiver(it) } }
         screen = null
         session?.run {
@@ -308,6 +625,29 @@ class PlaybackService : MediaSessionService() {
         }
 
         /**
+         * Любая команда снаружи — из приложения, шторки, с руля — означает, что за плеер
+         * взялись руками. Догонять после этого автостарт нельзя: пауза, поставленная
+         * водителем, не должна отменяться сама собой через пару секунд.
+         *
+         * Заодно отмечаем, остановили ли музыку руками: по этому признаку пробуждение
+         * отличает свою тишину от чужой.
+         */
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int,
+        ): Int {
+            handsOn = true
+            when (playerCommand) {
+                // Команда одна и на «играть», и на «паузу», а что именно просят — видно
+                // только по тому, что происходит сейчас: команда ещё не выполнена.
+                Player.COMMAND_PLAY_PAUSE -> pausedByHand = session.player.playWhenReady
+                Player.COMMAND_STOP -> pausedByHand = true
+            }
+            return SessionResult.RESULT_SUCCESS
+        }
+
+        /**
          * Физические кнопки.
          *
          * Перехватываем только «стоп». По умолчанию он останавливает плеер целиком, и
@@ -326,7 +666,11 @@ class PlaybackService : MediaSessionService() {
             if (event?.keyCode != KeyEvent.KEYCODE_MEDIA_STOP) {
                 return super.onMediaButtonEvent(session, controllerInfo, intent)
             }
-            if (event.action == KeyEvent.ACTION_DOWN) session.player.pause()
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                handsOn = true
+                pausedByHand = true
+                session.player.pause()
+            }
             return true
         }
 
@@ -345,19 +689,26 @@ class PlaybackService : MediaSessionService() {
             val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             serviceScope.launch {
                 val saved = playbackState.load()
-                val items = saved?.let { state ->
-                    mirror.tracksByIds(state.trackIds).mapNotNull { it.toMediaItem(downloads.localPath(it.id)) }
-                }.orEmpty()
-
+                if (saved == null) {
+                    future.setException(UnsupportedOperationException("Нечего возобновлять"))
+                    return@launch
+                }
+                val fromMirror = runCatching { mirror.tracksByIds(saved.trackIds) }
+                    .getOrDefault(emptyList())
+                    .associateBy { it.id }
+                val items = buildQueue(saved, fromMirror)
                 if (items.isEmpty()) {
                     future.setException(UnsupportedOperationException("Нечего возобновлять"))
                     return@launch
                 }
+                // Тот же счёт по идентификатору, что и при обычном восстановлении: индекс
+                // врёт ровно там, где из очереди выпал хоть один трек.
+                val at = startIndexOf(saved, items)
                 future.set(
                     MediaSession.MediaItemsWithStartPosition(
                         items,
-                        saved!!.index.coerceIn(0, items.lastIndex),
-                        saved.positionMs,
+                        at.coerceAtLeast(0),
+                        if (at >= 0) saved.positionMs else 0L,
                     ),
                 )
             }
@@ -385,13 +736,29 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    private companion object {
-        const val TAG = "PlaybackService"
+    companion object {
+        private const val TAG = "PlaybackService"
+
+        /** Служба поднята после включения магнитолы или обновления приложения. */
+        const val ACTION_RESUME_AFTER_BOOT = "com.vitz.music.app.RESUME_AFTER_BOOT"
 
         /** Компромисс между износом хранилища и тем, сколько секунд теряется при обрыве питания. */
-        const val SAVE_INTERVAL_MS = 5_000L
+        private const val SAVE_INTERVAL_MS = 5_000L
 
-        val ALLOWED_PACKAGES = setOf(
+        /** Сколько раз и с каким шагом повторять пуск, пока голова занимает звук. */
+        private const val START_ATTEMPTS = 30
+        private const val START_RETRY_MS = 2_000L
+
+        /** Сон, после которого даже ручную паузу считаем прошлой поездкой, а не «отвернулся». */
+        private const val LONG_SLEEP_MS = 5 * 60_000L
+
+        /** Сколько держим передний план после включения магнитолы. Дольше догона автостарта. */
+        private const val BOOT_HOLD_ATTEMPTS = 70
+        private const val BOOT_HOLD_STEP_MS = 1_000L
+        private const val BOOT_NOTIFICATION_ID = 4711
+        private const val BOOT_CHANNEL_ID = "vitz-music-resume"
+
+        private val ALLOWED_PACKAGES = setOf(
             "com.vitz.music.app",
             "com.vitz.music.app.debug",
             "com.vitz.dashboard",

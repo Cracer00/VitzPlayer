@@ -21,14 +21,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.util.UnstableApi
@@ -42,6 +39,7 @@ import com.vitz.music.api.TrackDto
 import com.vitz.music.app.VitzMusicApp
 import com.vitz.music.app.ui.downloads.DownloadsScreen
 import com.vitz.music.app.ui.library.LibraryScreen
+import com.vitz.music.app.ui.library.LibraryTab
 import com.vitz.music.app.ui.library.LibraryViewModel
 import com.vitz.music.app.ui.library.PlaylistDetailScreen
 import com.vitz.music.app.ui.library.PlaylistsScreen
@@ -93,6 +91,7 @@ private val destinations = listOf(
 fun MainScreen(
     me: MeResponse,
     app: VitzMusicApp,
+    player: PlayerController,
     offline: Boolean,
     onRetryConnection: () -> Unit,
     onLogout: () -> Unit,
@@ -105,18 +104,11 @@ fun MainScreen(
     val backStack by nav.currentBackStackEntryAsState()
     val currentRoute = backStack?.destination?.route
 
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val player = remember {
-        PlayerController(
-            context = context.applicationContext,
-            scope = scope,
-            localPath = { trackId -> app.downloads.localPath(trackId) },
-        )
-    }
-    DisposableEffect(Unit) {
-        player.connect()
-        onDispose { player.release() }
+    // Музыка прошлой поездки продолжилась сама — открываем то, из чего она играет.
+    // Список «все треки» в этот момент показывает случайное место каталога, а автостарту
+    // почти всегда предшествует отмеченное сердечком.
+    LaunchedEffect(player.restoredTrackId) {
+        if (player.restoredTrackId != null) model.switchTab(LibraryTab.LIKED)
     }
 
     val onPlay: (TrackDto, List<TrackDto>) -> Unit = { track, queue -> player.play(track, queue) }

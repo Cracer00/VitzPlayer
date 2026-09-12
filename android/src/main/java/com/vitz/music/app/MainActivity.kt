@@ -15,9 +15,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.vitz.music.app.player.PlayerController
 import com.vitz.music.app.ui.AppState
 import com.vitz.music.app.ui.AppViewModel
 import com.vitz.music.app.ui.LoginScreen
@@ -59,6 +64,26 @@ class MainActivity : ComponentActivity() {
 @androidx.media3.common.util.UnstableApi
 @Composable
 private fun AppRoot(model: AppViewModel, app: VitzMusicApp, modifier: Modifier = Modifier) {
+    // Подключение к службе — до проверки входа, а не внутри главного экрана.
+    //
+    // Проверка ходит на сервер, и в машине без связи она упирается в таймаут: пока он идёт,
+    // на экране крутится колесо, служба даже не создана, и восстанавливать прошлую поездку
+    // некому. Музыке сервер не нужен — очередь лежит в зеркале, файлы на диске, — поэтому
+    // плеер поднимается сразу, параллельно с проверкой.
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val player = remember {
+        PlayerController(
+            context = context.applicationContext,
+            scope = scope,
+            localPath = { trackId -> app.downloads.localPath(trackId) },
+        )
+    }
+    DisposableEffect(Unit) {
+        player.connect()
+        onDispose { player.release() }
+    }
+
     when (val state = model.state) {
         AppState.Loading -> Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator()
@@ -73,6 +98,7 @@ private fun AppRoot(model: AppViewModel, app: VitzMusicApp, modifier: Modifier =
         is AppState.LoggedIn -> MainScreen(
             me = state.me,
             app = app,
+            player = player,
             offline = state.offline,
             onRetryConnection = model::retryConnection,
             onLogout = model::logout,

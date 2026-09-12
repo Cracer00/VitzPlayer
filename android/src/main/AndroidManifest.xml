@@ -10,6 +10,12 @@
     <!-- Громкость мультимедиа при автостарте: магнитола просыпается с той, что осталась. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!--
+        Включение магнитолы: без него после выключенного зажигания приложение просто
+        не запущено, и возвращать музыку прошлой поездки некому.
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- Самообновление: скачивание сборки и установка её поверх текущей. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
@@ -21,12 +27,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.VitzMusic">
 
+        <!--
+            stateAlwaysHidden: на запуске экран получает фокус, первым в разметке стоит поле
+            поиска, и магнитола немедленно выкидывала клавиатуру во весь экран. Клавиатура
+            здесь нужна ровно по нажатию на поле — это нажатие её и покажет.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:label="@string/app_name"
-            android:theme="@style/Theme.VitzMusic">
+            android:theme="@style/Theme.VitzMusic"
+            android:windowSoftInputMode="stateAlwaysHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -56,6 +68,20 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            Включение магнитолы и обновление приложения. Поднимает службу воспроизведения,
+            дальше она сама возвращает очередь, трек и позицию — тем же кодом, что и при
+            обычном запуске.
+        -->
+        <receiver
+            android:name=".player.ResumeOnBootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
