@@ -22,15 +22,13 @@ import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import java.util.UUID
 
-private val EMAIL_RE = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
-
 fun Route.authRoutes(services: AppServices) = route("/api/v1") {
     val tokens = services.tokens
     val cfg = services.cfg
 
     post("/auth/register") {
         val body = call.receive<RegisterRequest>()
-        if (!EMAIL_RE.matches(body.email.trim())) badRequest("Некорректный адрес почты")
+        if (!Users.isValidEmail(body.email)) badRequest("Некорректный адрес почты")
         if (body.password.length < 8) badRequest("Пароль короче 8 символов")
         if (body.displayName.isBlank()) badRequest("Пустое имя")
 

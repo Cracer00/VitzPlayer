@@ -575,6 +575,42 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
             when (notice) {
                 "password_ok" -> p { style = "color:#4cc38a"; +"Пароль изменён, прежние сессии этого пользователя отозваны" }
                 "password_short" -> p { style = "color:#ff6b6b"; +"Пароль короче 8 символов — не менял" }
+                "role_ok" -> p { style = "color:#4cc38a"; +"Роль изменена" }
+                "role_same" -> p { style = "color:#9aa"; +"Роль та же — ничего не менял" }
+                "role_self" -> p { style = "color:#ff6b6b"; +"Свою роль сменить нельзя — попросите другого администратора" }
+                "role_last_admin" -> p { style = "color:#ff6b6b"; +"Это последний администратор — сначала назначьте другого" }
+                "role_gone" -> p { style = "color:#ff6b6b"; +"Пользователь не найден" }
+                "role_bad" -> p { style = "color:#ff6b6b"; +"Неизвестная роль" }
+                "new_ok" -> p { style = "color:#4cc38a"; +"Пользователь создан" }
+                "new_email_bad" -> p { style = "color:#ff6b6b"; +"Некорректный адрес почты — не создал" }
+                "new_name_empty" -> p { style = "color:#ff6b6b"; +"Пустое имя — не создал" }
+                "new_pass_short" -> p { style = "color:#ff6b6b"; +"Пароль короче 8 символов — не создал" }
+                "new_taken" -> p { style = "color:#ff6b6b"; +"Такая почта уже занята" }
+            }
+            form(action = "/admin/users", method = FormMethod.post) {
+                hiddenInput(name = "csrf") { value = session.csrf }
+                div("row") {
+                    textInput(name = "email") {
+                        placeholder = "почта"
+                        attributes["autocomplete"] = "off"
+                    }
+                    textInput(name = "displayName") {
+                        placeholder = "имя"
+                        attributes["autocomplete"] = "off"
+                    }
+                    passwordInput(name = "password") {
+                        placeholder = "пароль, не короче 8 символов"
+                        style = "width:230px"
+                        attributes["autocomplete"] = "new-password"
+                    }
+                    select {
+                        name = "role"
+                        Users.ROLES.forEach { role ->
+                            option { value = role; selected = role == "user"; +roleTitle(role) }
+                        }
+                    }
+                    button(classes = "primary", type = ButtonType.submit) { +"Создать пользователя" }
+                }
             }
             table {
                 thead {
@@ -588,7 +624,26 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
                         tr {
                             td { +user.email }
                             td { +user.displayName }
-                            td { +user.role }
+                            td {
+                                if (user.id.toString() == session.userId) {
+                                    +"${roleTitle(user.role)} (вы)"
+                                } else {
+                                    form(action = "/admin/users/${user.id}/role", method = FormMethod.post, classes = "inline") {
+                                        hiddenInput(name = "csrf") { value = session.csrf }
+                                        select {
+                                            name = "role"
+                                            Users.ROLES.forEach { role ->
+                                                option {
+                                                    value = role
+                                                    selected = role == user.role
+                                                    +roleTitle(role)
+                                                }
+                                            }
+                                        }
+                                        button(type = ButtonType.submit) { +"сменить" }
+                                    }
+                                }
+                            }
                             td { +(if (user.disabledAt == null) "активен" else "заблокирован") }
                             td {
                                 form(action = "/admin/users/${user.id}/password", method = FormMethod.post, classes = "inline") {
@@ -664,6 +719,67 @@ fun Route.adminRoutes(services: AppServices) = route("/admin") {
             Users.setDisabled(c, id, user.disabledAt == null)
         }
         call.respondRedirect("/admin/users")
+    }
+
+    post("/users") {
+        val session = call.requireAdmin() ?: return@post
+        val params = call.receiveParameters()
+        if (params["csrf"] != session.csrf) forbidden()
+        val email = params["email"].orEmpty().trim()
+        val displayName = params["displayName"].orEmpty().trim()
+        val password = params["password"].orEmpty()
+        val role = params["role"].orEmpty()
+        val complaint = when {
+            !Users.isValidEmail(email) -> "new_email_bad"
+            displayName.isEmpty() -> "new_name_empty"
+            password.length < 8 -> "new_pass_short"
+            role !in Users.ROLES -> "role_bad"
+            else -> null
+        }
+        if (complaint != null) {
+            call.respondRedirect("/admin/users?notice=$complaint")
+            return@post
+        }
+        val notice = try {
+            dbTx { c ->
+                if (Users.findByEmail(c, email) != null) return@dbTx "new_taken"
+                Users.create(c, email, password, displayName, role)
+                "new_ok"
+            }
+        } catch (e: SQLException) {
+            // Единственная ожидаемая причина — уникальный индекс по email_norm: кто-то успел раньше.
+            call.application.log.info("Пользователя $email создать не вышло: ${e.message}")
+            "new_taken"
+        }
+        call.respondRedirect("/admin/users?notice=$notice")
+    }
+
+    post("/users/{id}/role") {
+        val session = call.requireAdmin() ?: return@post
+        val params = call.receiveParameters()
+        if (params["csrf"] != session.csrf) forbidden()
+        val id = UUID.fromString(call.parameters["id"])
+        val role = params["role"].orEmpty()
+        if (role !in Users.ROLES) {
+            call.respondRedirect("/admin/users?notice=role_bad")
+            return@post
+        }
+        // Снять роль с себя — самый простой способ остаться без админки, запрещаем.
+        if (id.toString() == session.userId) {
+            call.respondRedirect("/admin/users?notice=role_self")
+            return@post
+        }
+        val notice = dbTx { c ->
+            val user = Users.findById(c, id) ?: return@dbTx "role_gone"
+            if (user.role == role) return@dbTx "role_same"
+            if (user.role == "admin" && Users.countAdmins(c) <= 1) return@dbTx "role_last_admin"
+            Users.setRole(c, id, role)
+            // Понижение должно действовать сразу: старый access-токен ещё 15 минут считает
+            // пользователя админом, поэтому выбрасываем его сессии.
+            if (role != "admin") Users.revokeSessions(c, id)
+            "role_ok"
+        }
+        call.respondRedirect("/admin/users?notice=$notice")
     }
 
     post("/users/{id}/password") {
@@ -768,6 +884,12 @@ private suspend fun ApplicationCall.page(
         main { block() }
         script(src = "/admin/app.js") {}
     }
+}
+
+private fun roleTitle(role: String): String = when (role) {
+    "admin" -> "администратор"
+    "user" -> "слушатель"
+    else -> role
 }
 
 private fun FlowContent.labeled(label: String, block: FlowContent.() -> Unit) {

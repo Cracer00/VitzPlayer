@@ -39,6 +39,14 @@ data class InviteRow(
 object Users {
     private val log = LoggerFactory.getLogger(Users::class.java)
 
+    /** Те же значения, что и в check-ограничении users.role в миграции V1. */
+    val ROLES = listOf("user", "admin")
+
+    private val EMAIL_RE = Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+
+    /** Одна проверка адреса на регистрацию через API и на форму в админке. */
+    fun isValidEmail(email: String): Boolean = EMAIL_RE.matches(email.trim())
+
     fun normalizeEmail(email: String): String = email.trim().lowercase(Locale.ROOT)
 
     private fun Connection.userBy(where: String, arg: Any?): UserRow? = selectOne(
@@ -88,6 +96,18 @@ object Users {
         c.exec("update users set disabled_at = ? where id = ?", if (disabled) Instant.now() else null, id)
         if (disabled) revokeSessions(c, id)
     }
+
+    /**
+     * Роль живёт в access-токене, поэтому сама по себе смена роли доходит до клиента
+     * только на следующем обновлении токена — [revokeSessions] для понижения прав
+     * вызывает тот, кто меняет роль.
+     */
+    fun setRole(c: Connection, id: UUID, role: String) {
+        c.exec("update users set role = ? where id = ?", role, id)
+    }
+
+    fun countAdmins(c: Connection): Long =
+        c.selectOne("select count(*) from users where role = 'admin' and disabled_at is null") { it.getLong(1) } ?: 0L
 
     fun setPassword(c: Connection, id: UUID, password: String) {
         c.exec("update users set password_hash = ? where id = ?", Passwords.hash(password), id)
