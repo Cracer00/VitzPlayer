@@ -102,6 +102,9 @@ class PlaybackService : MediaSessionService() {
     /** За плеер взялись руками. После этого автостарт себя не навязывает. */
     private var handsOn = false
 
+    /** Синхронизацию ради пустой очереди просили. Повторять её каждую попытку незачем. */
+    private var resyncTried = false
+
     /** Догон автостарта: попытки дождаться, когда голова отдаст звук. */
     private var startRetry: Job? = null
 
@@ -327,14 +330,17 @@ class PlaybackService : MediaSessionService() {
         }
         restoring = true
         serviceScope.launch {
-            val fromMirror = runCatching { mirror.tracksByIds(saved.trackIds) }
-                .onFailure { Log.w(TAG, "Очередь прошлой поездки не прочиталась", it) }
-                .getOrDefault(emptyList())
-                .associateBy { it.id }
-            val items = buildQueue(saved, fromMirror)
+            // Флаг снимается на любом исходе, включая исключение по дороге: оставленный
+            // поднятым, он выключает сохранение позиции до конца жизни процесса — поездка
+            // пишется в никуда, а следующая начинается с позапрошлого места.
+            try {
+                val fromMirror = runCatching { mirror.tracksByIds(saved.trackIds) }
+                    .onFailure { Log.w(TAG, "Очередь прошлой поездки не прочиталась", it) }
+                    .getOrDefault(emptyList())
+                    .associateBy { it.id }
+                val items = buildQueue(saved, fromMirror)
 
-            withContext(Dispatchers.Main) {
-                try {
+                withContext(Dispatchers.Main) {
                     if (items.isEmpty()) {
                         // Молчание здесь ни от чего не отличимо, а причина ровно одна:
                         // зеркало не знает этих треков и снимка тоже не осталось.
@@ -343,6 +349,7 @@ class PlaybackService : MediaSessionService() {
                             "Очередь не собралась: сохранено ${saved.trackIds.size}, " +
                                 "в зеркале ${fromMirror.size}, играбельных 0",
                         )
+                        resyncAndRetry(player)
                         return@withContext
                     }
                     // Пока читали зеркало, пользователь мог уже включить что-то сам.
@@ -375,13 +382,41 @@ class PlaybackService : MediaSessionService() {
                     Log.i(TAG, "Продолжаю прошлую поездку с ${saved.positionMs} мс")
                     applyStartVolume()
                     startPlayback(player)
-                } finally {
-                    // Флаг снимается на любом исходе: оставленный поднятым, он выключил бы
-                    // сохранение позиции насовсем, и следующая поездка началась бы
-                    // с позапрошлого места.
-                    restoring = false
                 }
+            } catch (failed: Exception) {
+                // Падать нельзя: это убило бы службу посреди поездки, а восстановление —
+                // не то, ради чего стоит замолчать совсем.
+                Log.w(TAG, "Восстановление прошлой поездки сорвалось", failed)
+            } finally {
+                restoring = false
             }
+        }
+    }
+
+    /**
+     * Очередь не собралась — просим синхронизацию и пробуем ещё раз.
+     *
+     * Без этого автозапуск при включении зажигания оставался молчать до конца поездки:
+     * зеркало наполняет только экран библиотеки, а при автозапуске экрана нет вовсе —
+     * ни синхронизации, ни второй попытки, пока водитель сам не откроет приложение.
+     * Чаще всего так и бывает после самообновления: смена версии базы пересоздаёт её
+     * пустой, и собирать очередь не из чего.
+     *
+     * Одна попытка: нет сети или не вошли — значит, и повторять нечего.
+     */
+    private fun resyncAndRetry(player: ExoPlayer) {
+        if (resyncTried) return
+        resyncTried = true
+        serviceScope.launch {
+            val received = runCatching { app.sync.sync() }
+                .onFailure { Log.w(TAG, "Синхронизация ради очереди не прошла", it) }
+                .getOrDefault(-1)
+            if (received < 0) {
+                Log.w(TAG, "Зеркало наполнить не удалось — возвращаться по-прежнему не к чему")
+                return@launch
+            }
+            Log.i(TAG, "Зеркало наполнено ($received), пробую собрать очередь ещё раз")
+            withContext(Dispatchers.Main) { restoreLastPlayback(player) }
         }
     }
 
